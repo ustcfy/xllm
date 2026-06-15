@@ -66,6 +66,14 @@ extern char** environ;
 namespace xllm {
 namespace {
 void handle_signal(int signum) { _exit(0); }
+
+bool uses_aux_hidden_speculative_worker(const runtime::Options& options) {
+  if (!options.enable_speculative_decode()) {
+    return false;
+  }
+  const std::string& algorithm = options.speculative_algorithm();
+  return algorithm == "Eagle3" || algorithm == "DFlash";
+}
 }  // namespace
 
 void WorkerServer::create_server(const runtime::Options& options,
@@ -363,6 +371,11 @@ WorkerServer::WorkerServer(int32_t local_worker_idx,
                            bool use_spawn_worker)
     : server_name_("DistributeWorkerServer") {
   server_name_.append(std::to_string(options.server_idx()));
+  if (use_spawn_worker && uses_aux_hidden_speculative_worker(options)) {
+    LOG(FATAL) << options.speculative_algorithm()
+               << " does not support spawned workers yet. Disable offline "
+                  "spawn workers or use --speculative_algorithm=MTP.";
+  }
 
   if (worker_type == WorkerType::LLM || worker_type == WorkerType::ELM ||
       worker_type == WorkerType::VLM || worker_type == WorkerType::EVLM ||

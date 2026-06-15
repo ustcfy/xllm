@@ -72,6 +72,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
 #endif
+#include "util/json_reader.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -128,6 +129,55 @@ class ScopedAtenLoadThreads {
   int32_t prev_threads_ = 0;
   bool active_ = false;
 };
+
+bool is_dflash_draft_engine(const runtime::Options& options) {
+  return options.is_draft_engine() &&
+         options.speculative_algorithm() == "DFlash";
+}
+
+bool is_dflash_algorithm(const runtime::Options& options) {
+  return options.enable_speculative_decode() &&
+         options.speculative_algorithm() == "DFlash";
+}
+
+std::vector<int32_t> read_dflash_target_layer_ids(
+    const std::string& model_weights_path) {
+  JsonReader reader;
+  const std::string config_path = model_weights_path + "/config.json";
+  CHECK(reader.parse(config_path))
+      << "Failed to parse DFlash draft config: " << config_path;
+  std::optional<std::vector<int32_t>> target_layer_ids =
+      reader.value<std::vector<int32_t>>("dflash_config.target_layer_ids");
+  CHECK(target_layer_ids.has_value())
+      << "DFlashDraftModel requires dflash_config.target_layer_ids.";
+  CHECK(!target_layer_ids->empty())
+      << "DFlashDraftModel requires non-empty dflash_config.target_layer_ids.";
+  std::optional<int32_t> num_target_layers =
+      reader.value<int32_t>("num_target_layers");
+  int32_t previous_layer_id = -1;
+  for (int32_t layer_id : target_layer_ids.value()) {
+    CHECK_GE(layer_id, 0) << "DFlash target layer id must be non-negative.";
+    CHECK_GT(layer_id, previous_layer_id)
+        << "DFlash target_layer_ids must be strictly increasing.";
+    if (num_target_layers.has_value()) {
+      CHECK_LT(layer_id + 1, num_target_layers.value())
+          << "DFlash target layer id is not capturable by Qwen3 hidden "
+             "state capture.";
+    }
+    previous_layer_id = layer_id;
+  }
+  return target_layer_ids.value();
+}
+
+std::vector<int32_t> to_qwen3_capture_layer_ids(
+    const std::vector<int32_t>& target_layer_ids) {
+  std::vector<int32_t> capture_layer_ids;
+  capture_layer_ids.reserve(target_layer_ids.size());
+  for (int32_t layer_id : target_layer_ids) {
+    capture_layer_ids.emplace_back(layer_id + 1);
+  }
+  return capture_layer_ids;
+}
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
                                      const torch::Device& device) {
@@ -1282,8 +1332,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
-  auto tokenizer = model_loader->tokenizer();
-  CHECK(tokenizer != nullptr);
+  const bool dflash_draft_engine = is_dflash_draft_engine(options_);
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1291,21 +1340,38 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   args.embedding_mode(embedding_mode);
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
-  int64_t model_vocab_size = args.vocab_size();
-  // use tokenizer vocab size if model vocab size is not set
-  if (model_vocab_size <= 0) {
-    LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab size: "
-                 << tokenizer_vocab_size;
-    args.vocab_size(tokenizer_vocab_size);
-  } else if (tokenizer_vocab_size > model_vocab_size) {
-    LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: " << tokenizer_vocab_size
-                 << ", model: " << model_vocab_size;
+  if (!dflash_draft_engine) {
+    std::unique_ptr<Tokenizer> tokenizer = model_loader->tokenizer();
+    CHECK(tokenizer != nullptr);
+    const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
+    int64_t model_vocab_size = args.vocab_size();
+    // use tokenizer vocab size if model vocab size is not set
+    if (model_vocab_size <= 0) {
+      LOG(WARNING)
+          << "Model vocab size is not set, using tokenizer vocab size: "
+          << tokenizer_vocab_size;
+      args.vocab_size(tokenizer_vocab_size);
+    } else if (tokenizer_vocab_size > model_vocab_size) {
+      LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
+                   << tokenizer_vocab_size << ", model: " << model_vocab_size;
+    }
   }
 
 #if defined(USE_NPU)
-  if (options_.enable_speculative_decode() &&
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+  if (dflash_draft_engine) {
+    LOG(INFO) << "Overriding draft model_type from " << args.model_type()
+              << " to DFlashDraftModel for DFlash speculative decoding";
+    args.model_type("DFlashDraftModel");
+    args.layers_to_capture(read_dflash_target_layer_ids(model_weights_path_));
+  } else if (is_dflash_algorithm(options_)) {
+    const std::optional<std::string>& draft_model_path =
+        options_.draft_model_path();
+    CHECK(draft_model_path.has_value()) << "DFlash requires --draft_model.";
+    args.layers_to_capture(to_qwen3_capture_layer_ids(
+        read_dflash_target_layer_ids(draft_model_path.value())));
+  } else if (options_.enable_speculative_decode() &&
+             ::xllm::SpeculativeConfig::get_instance()
+                 .enable_atb_spec_kernel()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   } else if (options_.enable_speculative_decode() &&
              options_.num_speculative_tokens() == 0 &&

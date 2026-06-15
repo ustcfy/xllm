@@ -721,9 +721,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   ForwardInput prefill_input;
   prepare_prefill_inputs(input, prefill_input);
 
-  // prepare input for draft model
-  auto& embeddings = output.sample_output.embeddings;
-
+  const torch::Tensor& embeddings = output.sample_output.embeddings;
   if (embeddings.defined()) {
     prefill_input.input_params.embedding.input_embedding = embeddings.clone();
   }
@@ -851,11 +849,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   if (use_qwen3_5_spec_verify_path()) {
     stabilize_decode_host_tensors(input);
   }
-  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-
   std::vector<ForwardOutput> draft_outputs;
-  ForwardInput current_draft_input, validate_input, next_step_input;
-  Timer timer;
+  ForwardInput validate_input;
 
   CHECK(embedding_cache_ != nullptr) << "MTP embedding cache is not allocated";
 
@@ -913,6 +908,20 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   //                         input.token_ids_host,
   //                         enable_schedule_overlap());
   update_decode_step_input(input, last_states);
+  draft_outputs = run_decode_draft(input, last_states, validate_input);
+  return run_validate(input, draft_outputs, validate_input);
+}
+
+std::vector<ForwardOutput> MTPWorkerImpl::run_decode_draft(
+    const ForwardInput& input,
+    const std::vector<EmbeddingCache::DecodeState>& last_states,
+    ForwardInput& validate_input) {
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  std::vector<ForwardOutput> draft_outputs;
+  ForwardInput current_draft_input;
+  ForwardInput next_step_input;
+  Timer timer;
+
   prepare_draft_extend_inputs(input, last_states, current_draft_input);
   draft_outputs.reserve(num_speculative_tokens);
   const bool reuse_mtp_topk_indices =
@@ -959,7 +968,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
-  return run_validate(input, draft_outputs, validate_input);
+  return draft_outputs;
 }
 
 void MTPWorkerImpl::fill_validate_input_from_draft_outputs(

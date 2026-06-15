@@ -91,6 +91,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Default MTP behavior always compresses probs for cache storage.
   virtual void process_draft_sample_output(SampleOutput& sample_output);
 
+  virtual std::vector<ForwardOutput> run_decode_draft(
+      const ForwardInput& input,
+      const std::vector<EmbeddingCache::DecodeState>& last_states,
+      ForwardInput& validate_input);
+
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const torch::Tensor& draft_token_ids,
                         const torch::Tensor& draft_probs,
@@ -123,8 +128,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const std::vector<EmbeddingCache::DecodeState>& last_states,
       ForwardInput& extend_input);
 
-  void write_target_context_to_cache(const ForwardInput& input,
-                                     const SampleOutput& validate_output);
+  virtual void write_target_context_to_cache(
+      const ForwardInput& input,
+      const SampleOutput& validate_output);
 
  protected:
   // Draft model worker

@@ -29,6 +29,14 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+
+bool is_dflash_algorithm(const runtime::Options& options) {
+  return options.speculative_algorithm() == "DFlash";
+}
+
+}  // namespace
+
 SpeculativeEngine::SpeculativeEngine(const runtime::Options& options)
     : SpeculativeEngine(options, /*use_draft_engine=*/true) {}
 
@@ -97,25 +105,27 @@ bool SpeculativeEngine::init_model() {
       return false;
     }
 
-    // check if the tokenizers are compatible
-    const auto* draft_tokenizer = draft_engine_->tokenizer();
-    const auto* target_tokenizer = engine_->tokenizer();
-    if (draft_tokenizer->vocab_size() != target_tokenizer->vocab_size()) {
-      LOG(ERROR) << "draft and target tokenizers have different vocab sizes, "
-                    "draft vocab_size: "
-                 << draft_tokenizer->vocab_size()
-                 << ", target vocab_size: " << target_tokenizer->vocab_size();
-      return false;
-    }
-
-    const std::string test_text = "hello from xllm!";
-    std::vector<int32_t> draft_token_ids;
-    std::vector<int32_t> target_token_ids;
-    if (!draft_tokenizer->encode(test_text, &draft_token_ids) ||
-        !target_tokenizer->encode(test_text, &target_token_ids)) {
-      if (draft_token_ids != target_token_ids) {
-        LOG(ERROR) << "draft and target tokenizers are not compatible";
+    if (!is_dflash_algorithm(options_)) {
+      // check if the tokenizers are compatible
+      const Tokenizer* draft_tokenizer = draft_engine_->tokenizer();
+      const Tokenizer* target_tokenizer = engine_->tokenizer();
+      if (draft_tokenizer->vocab_size() != target_tokenizer->vocab_size()) {
+        LOG(ERROR) << "draft and target tokenizers have different vocab sizes, "
+                      "draft vocab_size: "
+                   << draft_tokenizer->vocab_size()
+                   << ", target vocab_size: " << target_tokenizer->vocab_size();
         return false;
+      }
+
+      const std::string test_text = "hello from xllm!";
+      std::vector<int32_t> draft_token_ids;
+      std::vector<int32_t> target_token_ids;
+      if (!draft_tokenizer->encode(test_text, &draft_token_ids) ||
+          !target_tokenizer->encode(test_text, &target_token_ids)) {
+        if (draft_token_ids != target_token_ids) {
+          LOG(ERROR) << "draft and target tokenizers are not compatible";
+          return false;
+        }
       }
     }
 
