@@ -449,7 +449,11 @@ TEST(DraftProbsBuilderTest, CompressForCacheDense) {
   EXPECT_TRUE(torch::allclose(compressed, expected));
 }
 
-TEST(DraftProbsBuilderTest, BuildValidateTensorsSelectedOnly) {
+TEST(DraftProbsBuilderTest, BuildValidateTensorsGreedyUndefined) {
+  // Greedy draft (enable_probabilistic_draft=false): the draft is argmax, so q
+  // is a one-hot point mass and no draft probabilities are needed. The builder
+  // returns the concatenated draft token ids and an UNDEFINED draft_probs
+  // tensor; probs_steps is ignored.
   std::vector<torch::Tensor> token_steps = {
       torch::tensor({3, 4}, torch::kInt64),
       torch::tensor({5, 6}, torch::kInt64)};
@@ -462,33 +466,44 @@ TEST(DraftProbsBuilderTest, BuildValidateTensorsSelectedOnly) {
                                          probs_steps,
                                          /*batch_size=*/2,
                                          /*vocab_size=*/8,
-                                         /*enable_opt_validate_probs=*/true);
+                                         /*enable_probabilistic_draft=*/false);
 
   EXPECT_EQ(draft_token_ids.dim(), 2);
-  EXPECT_EQ(draft_probs.dim(), 2);
   EXPECT_EQ(draft_token_ids.size(0), 2);
   EXPECT_EQ(draft_token_ids.size(1), 2);
-  EXPECT_EQ(draft_probs.size(0), 2);
-  EXPECT_EQ(draft_probs.size(1), 2);
-  EXPECT_TRUE(torch::allclose(
-      draft_probs,
-      torch::tensor({{0.3f, 0.5f}, {0.4f, 0.6f}}, torch::kFloat32)));
+  // step0 -> [[3],[4]], step1 -> [[5],[6]], cat over dim 1 -> [[3,5],[4,6]].
+  EXPECT_TRUE(torch::equal(draft_token_ids,
+                           torch::tensor({{3, 5}, {4, 6}}, torch::kInt64)));
+  // Greedy: draft_probs must be undefined (NO_DRAFT_PROBS path).
+  EXPECT_FALSE(draft_probs.defined());
 }
 
-TEST(DraftProbsBuilderTest, BuildValidateTensorsRecoveredDense) {
+TEST(DraftProbsBuilderTest, BuildValidateTensorsProbabilisticDense) {
+  // Probabilistic draft (enable_probabilistic_draft=true) requires each step's
+  // probs to be the full dense per-step softmax [batch, vocab]. The builder
+  // stacks them over the n_spec dimension into [batch, n_spec, vocab] verbatim
+  // (no scatter / normalization), so rejection can use the exact (p-q)+
+  // residual over the full vocab.
   std::vector<torch::Tensor> token_steps = {
       torch::tensor({1, 2}, torch::kInt64),
       torch::tensor({0, 3}, torch::kInt64)};
+  // Full dense [batch=2, vocab=5] per step; each row places the desired
+  // selected prob at the draft token and 1 - selected at the last position, so
+  // rows sum to 1 while selected values match the origin-main expected values.
   std::vector<torch::Tensor> probs_steps = {
-      torch::tensor({0.2f, 0.7f}, torch::kFloat32),
-      torch::tensor({0.9f, 0.1f}, torch::kFloat32)};
+      torch::tensor(
+          {{0.0f, 0.2f, 0.0f, 0.0f, 0.8f}, {0.0f, 0.0f, 0.7f, 0.0f, 0.3f}},
+          torch::kFloat32),
+      torch::tensor(
+          {{0.9f, 0.0f, 0.0f, 0.0f, 0.1f}, {0.0f, 0.0f, 0.0f, 0.1f, 0.9f}},
+          torch::kFloat32)};
 
   auto [draft_token_ids, draft_probs] =
       draftProbs::build_validate_tensors(token_steps,
                                          probs_steps,
                                          /*batch_size=*/2,
                                          /*vocab_size=*/5,
-                                         /*enable_opt_validate_probs=*/false);
+                                         /*enable_probabilistic_draft=*/true);
 
   EXPECT_EQ(draft_token_ids.dim(), 2);
   EXPECT_EQ(draft_probs.dim(), 3);
@@ -502,11 +517,14 @@ TEST(DraftProbsBuilderTest, BuildValidateTensorsRecoveredDense) {
       torch::tensor({{0.2f, 0.9f}, {0.7f, 0.1f}}, torch::kFloat32);
   EXPECT_TRUE(torch::allclose(selected, expected_selected));
 
+  // Full distribution preserved: each dense row still sums to 1.
   auto row_sums = draft_probs.sum(/*dim=*/-1);
-  EXPECT_TRUE(torch::allclose(row_sums, expected_selected));
+  EXPECT_TRUE(torch::allclose(row_sums, torch::ones({2, 2}, torch::kFloat32)));
 }
 
-TEST(DraftProbsBuilderTest, BuildValidateTensorsDenseInputFallback) {
+TEST(DraftProbsBuilderTest, BuildValidateTensorsProbabilisticSingleStep) {
+  // Single-step probabilistic draft: dense [batch, vocab] input is carried
+  // through to [batch, 1, vocab] without compression to selected-only scalars.
   std::vector<torch::Tensor> token_steps = {
       torch::tensor({2, 1}, torch::kInt64)};
   std::vector<torch::Tensor> probs_steps = {
@@ -517,16 +535,20 @@ TEST(DraftProbsBuilderTest, BuildValidateTensorsDenseInputFallback) {
                                          probs_steps,
                                          /*batch_size=*/2,
                                          /*vocab_size=*/3,
-                                         /*enable_opt_validate_probs=*/true);
+                                         /*enable_probabilistic_draft=*/true);
 
   EXPECT_EQ(draft_token_ids.dim(), 2);
   EXPECT_EQ(draft_token_ids.size(0), 2);
   EXPECT_EQ(draft_token_ids.size(1), 1);
-  EXPECT_EQ(draft_probs.dim(), 2);
+  EXPECT_EQ(draft_probs.dim(), 3);
   EXPECT_EQ(draft_probs.size(0), 2);
   EXPECT_EQ(draft_probs.size(1), 1);
+  EXPECT_EQ(draft_probs.size(2), 3);
+  // Full dense rows preserved verbatim.
   EXPECT_TRUE(torch::allclose(
-      draft_probs, torch::tensor({{0.7f}, {0.6f}}, torch::kFloat32)));
+      draft_probs,
+      torch::tensor({{{0.1f, 0.2f, 0.7f}}, {{0.3f, 0.6f, 0.1f}}},
+                    torch::kFloat32)));
 }
 
 TEST(SpecDecodeInputBuilderTest, MultiBlockDraftSingleRowPerSeq) {

@@ -159,6 +159,8 @@ namespace draftProbs {
 // Compress draft probs to selected-only format [batch_size] for cache storage.
 // Input draft_probs may be dense [batch_size, vocab_size] or selected-only
 // [batch_size] / [batch_size, 1].
+// NOTE: only used on the greedy (NO_DRAFT_PROBS) path where the scalar is a
+// placeholder; probabilistic keeps the full dense distribution instead.
 torch::Tensor compress_for_cache(const torch::Tensor& draft_probs,
                                  const torch::Tensor& draft_token_ids);
 
@@ -166,16 +168,16 @@ torch::Tensor compress_for_cache(const torch::Tensor& draft_probs,
 // Returns:
 //   - draft_token_ids: [batch_size, n_speculative_tokens]
 //   - draft_probs:
-//       * selected-only [batch_size, n_speculative_tokens], if
-//         enable_opt_validate_probs=true
-//       * recovered-dense [batch_size, n_speculative_tokens, vocab_size], if
-//         enable_opt_validate_probs=false
+//       * undefined tensor, if enable_probabilistic_draft=false (greedy /
+//         NO_DRAFT_PROBS: draft is argmax, q treated as one-hot)
+//       * full dense [batch_size, n_speculative_tokens, vocab_size], if
+//         enable_probabilistic_draft=true (exact (p-q)+ rejection)
 std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
     const std::vector<torch::Tensor>& draft_token_ids_steps,
     const std::vector<torch::Tensor>& draft_probs_steps,
     int32_t batch_size,
     int32_t vocab_size,
-    bool enable_opt_validate_probs);
+    bool enable_probabilistic_draft);
 
 }  // namespace draftProbs
 

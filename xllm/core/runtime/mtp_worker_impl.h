@@ -49,7 +49,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const runtime::Options& options,
                 const runtime::Options& target_options,
                 const runtime::Options& draft_options,
-                bool enable_opt_validate_probs = false);
+                bool enable_probabilistic_draft = false);
 
  public:
   bool init_model(const std::string& model_weights_path,
@@ -137,9 +137,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Embedding cache for speculative decoding
   std::shared_ptr<EmbeddingCache> embedding_cache_;
 
-  // Whether validation directly uses selected-only draft_probs [B, S].
-  // If false, selected-only cache values are restored to dense [B, S, V].
-  bool enable_opt_validate_probs_ = false;
+  // Whether the draft model samples probabilistically (random sampling with
+  // dense draft probs). If false (default, greedy), the draft uses argmax and
+  // rejection sampling treats draft probs as q=1 (NO_DRAFT_PROBS).
+  bool enable_probabilistic_draft_ = false;
 
 #if defined(USE_NPU) || defined(USE_MLU)
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;

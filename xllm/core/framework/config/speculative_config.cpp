@@ -61,11 +61,17 @@ DEFINE_bool(speculative_suffix_use_tree_spec,
             "Whether to use tree-based suffix speculation instead of path "
             "speculation.");
 
-DEFINE_bool(enable_opt_validate_probs,
-            false,
-            "Whether validate uses selected-only draft_probs [B,S] directly. "
-            "If false, selected-only cache values are restored to dense "
-            "[B,S,V].");
+DEFINE_bool(
+    enable_probabilistic_draft,
+    false,
+    "Draft sampling method for speculative decoding. false (default) = "
+    "greedy: draft always picks argmax and draft probabilities are "
+    "treated as one-hot during rejection sampling (NO_DRAFT_PROBS) -- "
+    "acceptance uses q=1 and the residual zeroes the draft token "
+    "(exact, zero extra HBM). true = probabilistic: draft samples from "
+    "its own distribution and carries full dense draft probabilities to "
+    "validate for exact (p-q)+ rejection (higher acceptance, costs "
+    "full-vocab HBM). Both are lossless.");
 
 DEFINE_bool(enable_atb_spec_kernel,
             false,
@@ -88,7 +94,7 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_use_tree_spec);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_opt_validate_probs);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
 }
 
@@ -104,7 +110,7 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_use_tree_spec);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_opt_validate_probs);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
 }
 
@@ -133,7 +139,7 @@ void SpeculativeConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, speculative_suffix_use_tree_spec);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_opt_validate_probs);
+      config_json, default_config, enable_probabilistic_draft);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_atb_spec_kernel);
 }

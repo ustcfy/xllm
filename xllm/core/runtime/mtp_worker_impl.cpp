@@ -489,16 +489,16 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                     MTPTargetOptions(options),
                     MTPDraftOptions(options),
                     ::xllm::SpeculativeConfig::get_instance()
-                        .enable_opt_validate_probs()) {}
+                        .enable_probabilistic_draft()) {}
 
 MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                              const torch::Device& device,
                              const runtime::Options& options,
                              const runtime::Options& target_options,
                              const runtime::Options& draft_options,
-                             bool enable_opt_validate_probs)
+                             bool enable_probabilistic_draft)
     : SpeculativeWorkerImpl(parallel_args, device, options, target_options),
-      enable_opt_validate_probs_(enable_opt_validate_probs) {
+      enable_probabilistic_draft_(enable_probabilistic_draft) {
   draft_impl_ =
       std::make_unique<LLMWorkerImpl>(parallel_args, device, draft_options);
 }
@@ -1176,7 +1176,12 @@ void MTPWorkerImpl::process_draft_sample_output(SampleOutput& sample_output) {
         << sample_output.probs.sizes();
     CHECK_EQ(sample_output.probs.size(0), sample_output.next_tokens.size(0))
         << "MTP draft cache probs/token batch mismatch";
-    // Cache always stores selected-only draft probs [batch_size] to reduce HBM.
+    // probabilistic: keep the full dense draft distribution [batch, vocab] so
+    // validate can build exact (p-q)+. greedy (NO_DRAFT_PROBS): draft probs are
+    // treated as one-hot, compress to selected-only [batch] to reduce HBM.
+    if (enable_probabilistic_draft_) {
+      return;
+    }
     sample_output.probs = specBuilder::draftProbs::compress_for_cache(
         sample_output.probs, sample_output.next_tokens);
   }
@@ -1744,7 +1749,7 @@ SampleOutput MTPWorkerImpl::validate(
           draft_probs_steps,
           batch_size,
           vocab_size,
-          enable_opt_validate_probs_);
+          enable_probabilistic_draft_);
   return validate(sampling_params, draft_token_ids, draft_probs, target_output);
 }
 
@@ -1769,22 +1774,34 @@ SampleOutput MTPWorkerImpl::validate(const SamplingParameters& sampling_params,
   auto target_logits =
       target_output.logits.view({batch_size, num_val_tokens, vocab_size});
 
-  // prepare input for rejection sampling
+  // Pass sampling_params so the RejectionSampler can shape p from RAW logits.
+  // Must be input.sampling_params ([batch] dims), NOT the num_val_tokens-
+  // repeated copy that feeds the target forward.
   auto rejection_sampler =
       std::make_unique<RejectionSampler>(sampling_params.do_sample,
                                          sampling_params.all_random_sample,
                                          sampling_params.all_greedy_sample,
                                          target_output.logprobs,
                                          target_output.max_top_logprobs,
-                                         enable_fused_kernel_);
+                                         enable_fused_kernel_,
+                                         sampling_params.temperatures,
+                                         sampling_params.top_k,
+                                         sampling_params.top_p,
+                                         sampling_params.frequency_penalties,
+                                         sampling_params.presence_penalties,
+                                         sampling_params.repetition_penalties,
+                                         sampling_params.unique_token_ids,
+                                         sampling_params.unique_token_counts);
 
-  // get the accepted tokens
-  SampleOutput sample_output =
-      rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
-                                 draft_probs.to(target_logits.device()),
-                                 target_logits,
-                                 bonus_token_ids,
-                                 /*mask_out_rejected_tokens=*/true);
+  // draft_probs may be undefined on the greedy (NO_DRAFT_PROBS) path; .to() on
+  // an undefined tensor throws ("tensor does not have a device").
+  SampleOutput sample_output = rejection_sampler->forward(
+      draft_token_ids.to(bonus_token_ids),
+      draft_probs.defined() ? draft_probs.to(target_logits.device())
+                            : draft_probs,
+      target_logits,
+      bonus_token_ids,
+      /*mask_out_rejected_tokens=*/true);
 
   // process embedding
   auto embeddings = target_output.sample_output.embeddings;

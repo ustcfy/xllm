@@ -22,6 +22,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "kernels/ops_api.h"
+#include "logits_utils.h"
 #include "sampler.h"
 
 namespace xllm {
@@ -41,11 +42,27 @@ RejectionSampler::RejectionSampler(const torch::Tensor& do_sample,
                                    bool all_greedy_sample,
                                    bool logprobs,
                                    int64_t max_top_logprobs,
-                                   bool enable_fused_kernel)
+                                   bool enable_fused_kernel,
+                                   const torch::Tensor& temperatures,
+                                   const torch::Tensor& top_k,
+                                   const torch::Tensor& top_p,
+                                   const torch::Tensor& frequency_penalties,
+                                   const torch::Tensor& presence_penalties,
+                                   const torch::Tensor& repetition_penalties,
+                                   const torch::Tensor& unique_token_ids,
+                                   const torch::Tensor& unique_token_counts)
     : logprobs_(logprobs),
       max_top_logprobs_(max_top_logprobs),
       all_random_sample_(all_random_sample),
       all_greedy_sample_(all_greedy_sample),
+      temperatures_(temperatures),
+      top_k_(top_k),
+      top_p_(top_p),
+      frequency_penalties_(frequency_penalties),
+      presence_penalties_(presence_penalties),
+      repetition_penalties_(repetition_penalties),
+      unique_token_ids_(unique_token_ids),
+      unique_token_counts_(unique_token_counts),
       enable_fused_kernel_(enable_fused_kernel) {
   CHECK(do_sample.defined());
   // Keep a private expanded view and do not mutate the caller-owned tensor.
@@ -57,9 +74,13 @@ RejectionSampler::RejectionSampler(const torch::Tensor& do_sample,
 
 // draft_token_ids: [batch_size, n_speculative_tokens]
 // draft_probs:
-//   1) dense format: [batch_size, n_speculative_tokens, vocab_size]
-//   2) selected-only format: [batch_size, n_speculative_tokens]
+//   1) undefined: greedy draft (NO_DRAFT_PROBS), q treated as one-hot
+//   2) dense format: [batch_size, n_speculative_tokens, vocab_size]
+//      (probabilistic draft, exact (p-q)+ rejection)
 // target_logits: [batch_size, n_speculative_tokens + 1, vocab_size]
+//   RAW model logits; the RejectionSampler applies penalties then
+//   temperature/top-k/top-p internally. Do NOT pass logits already shaped by
+//   the sampler.
 // bonus_token_ids: [batch_size, 1]
 // returns accepted tokens. [batch_size, n_speculative_tokens + 1]
 SampleOutput RejectionSampler::forward(const torch::Tensor& draft_token_ids,
@@ -69,12 +90,63 @@ SampleOutput RejectionSampler::forward(const torch::Tensor& draft_token_ids,
                                        bool mask_out_rejected_tokens) const {
   CHECK_EQ(draft_token_ids.size(0), do_sample_.size(0))
       << "batch size mismatch";
-  DCHECK_EQ(draft_token_ids.size(1), draft_probs.size(1));
-  // DCHECK_EQ(draft_probs.sizes(), target_probs.sizes());
+  DCHECK(!draft_probs.defined() ||
+         draft_token_ids.size(1) == draft_probs.size(1));
 
+  // Shape the target distribution p from raw logits here: target_logits is the
+  // RAW model output (the target worker stores output.logits = logits.clone()
+  // before its sampler mutates logits in place), so the RejectionSampler owns
+  // the penalty + T/top-k/top-p shaping instead of relying on the sampler's
+  // in-place side effect. The order mirrors Sampler::forward: penalties first,
+  // then temperature/top-k/top-p, yielding the correct sampled target
+  // distribution p = softmax(shaped).
+  //
+  // Penalty caveat (n_speculative > 1): a single per-request token history
+  // (unique_token_ids_/counts_) is broadcast to all n_speculative + 1
+  // positions, so positions after the first do NOT fold in the earlier draft
+  // tokens (t1..t_{i-1}). Their penalties are therefore approximate. This
+  // matches the pre-existing xLLM behavior; exact per-position penalty history
+  // is a follow-up (see PR description). For n_speculative == 1 the single
+  // position uses the exact prefix history and is unbiased.
+  torch::Tensor shaped_logits = target_logits;
+  const bool has_penalties =
+      frequency_penalties_.defined() || repetition_penalties_.defined();
+  if (has_penalties || temperatures_.defined() || top_k_.defined() ||
+      top_p_.defined()) {
+    const int64_t batch = shaped_logits.size(0);
+    const int64_t n_pos = shaped_logits.size(1);  // n_speculative + 1
+    const int64_t vocab = shaped_logits.size(2);
+    // apply_* are in-place and target_logits is a const ref, so clone.
+    auto logits_2d = shaped_logits.reshape({batch * n_pos, vocab}).clone();
+    // Broadcast per-request [batch] params to per-position [batch * n_pos].
+    auto expand_param = [n_pos](const torch::Tensor& t) {
+      return t.defined() ? t.repeat_interleave(n_pos, /*dim=*/0) : t;
+    };
+    // Penalties before top-k/top-p, mirroring Sampler::forward. Both penalty
+    // kernels index the same token history, so expand it once.
+    if (has_penalties) {
+      auto token_ids = expand_param(unique_token_ids_);
+      if (frequency_penalties_.defined()) {
+        apply_frequency_presence_penalties(logits_2d,
+                                           token_ids,
+                                           expand_param(unique_token_counts_),
+                                           expand_param(frequency_penalties_),
+                                           expand_param(presence_penalties_));
+      }
+      if (repetition_penalties_.defined()) {
+        apply_repetition_penalties(
+            logits_2d, token_ids, expand_param(repetition_penalties_));
+      }
+    }
+    apply_top_k_top_p(logits_2d,
+                      expand_param(temperatures_),
+                      expand_param(top_k_),
+                      expand_param(top_p_));
+    shaped_logits = logits_2d.reshape({batch, n_pos, vocab});
+  }
   // [batch_size, n_speculative_tokens + 1, vocab_size] FloatTensor
   auto target_probs =
-      torch::softmax(target_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+      torch::softmax(shaped_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
   // filter out probs for bonus tokens
   target_probs = target_probs.slice(
       /*dim=*/1, /*start=*/0, /*end=*/target_probs.size(1) - 1);
@@ -104,7 +176,7 @@ SampleOutput RejectionSampler::forward(const torch::Tensor& draft_token_ids,
                       mask_out_rejected_tokens);
   } else if (all_random_sample_) {
     auto uniform_rand =
-        torch::rand(draft_token_ids.sizes(), draft_probs.options());
+        torch::rand(draft_token_ids.sizes(), target_probs.options());
     std::tie(accepted_token_ids, masked_accepted_token_ids) =
         random_sampler_func(draft_token_ids,
                             draft_probs,
@@ -114,7 +186,7 @@ SampleOutput RejectionSampler::forward(const torch::Tensor& draft_token_ids,
                             mask_out_rejected_tokens);
   } else {
     auto uniform_rand =
-        torch::rand(draft_token_ids.sizes(), draft_probs.options());
+        torch::rand(draft_token_ids.sizes(), target_probs.options());
     // mixed sample, sample both then choose based on do_sample_
     auto [random, masked_random] =
         random_sampler_func(draft_token_ids,
@@ -141,8 +213,10 @@ SampleOutput RejectionSampler::forward(const torch::Tensor& draft_token_ids,
   if (logprobs_) {
     // log_softmax is equivalent to log(softmax) but more numerically stable
     // [batch_size, n_speculative_tokens + 1, vocab_size]
+    // Use the shaped logits so returned logprobs reflect the actual sampled
+    // distribution (tokens truncated by top-k/top-p get -inf).
     auto target_logprobs = torch::log_softmax(
-        target_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+        shaped_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
 
     // select the logprobs for each sequence
     const auto selected_logprobs =
@@ -192,36 +266,43 @@ std::tuple<torch::Tensor, torch::Tensor> RejectionSampler::random_sample(
     const torch::Tensor& uniform_rand,
     const torch::Tensor& bonus_token_ids,
     bool mask_out_rejected_tokens) {
-  const bool use_selected_only_draft_probs = (draft_probs.dim() == 2);
-
-  torch::Tensor selected_draft_probs;
-  if (use_selected_only_draft_probs) {
-    CHECK_EQ(draft_probs.sizes(), draft_token_ids.sizes())
-        << "selected-only draft_probs must have shape [batch, n_spec]";
-    selected_draft_probs = draft_probs;
-  } else {
-    CHECK_EQ(draft_probs.dim(), 3)
-        << "draft_probs must be either [batch, n_spec] or "
-           "[batch, n_spec, vocab]";
-    selected_draft_probs =
-        index_select_2d(draft_probs, /*dim=*/-1, draft_token_ids);
-  }
+  // Two lossless modes, distinguished by whether the draft carried a full
+  // dense distribution q:
+  //   * NO_DRAFT_PROBS (draft_probs undefined): greedy draft, q is a point
+  //     mass at the draft token. Acceptance = min(1, p(t)/1) = p(t); the
+  //     residual (p - q)+ reduces exactly to "p with the draft token zeroed".
+  //   * dense (draft_probs [batch, n_spec, vocab]): probabilistic draft.
+  //     Acceptance = min(1, p(t)/q(t)); residual = (p - q)+ over the full
+  //     vocab.
+  const bool no_draft_probs = !draft_probs.defined();
 
   auto selected_target_probs =
       index_select_2d(target_probs, /*dim=*/-1, draft_token_ids);
 
-  // std::min(probs, 1.0) element-wise
-  auto acceptance_probs = (selected_target_probs / selected_draft_probs);
+  torch::Tensor acceptance_probs;
+  if (no_draft_probs) {
+    // q(t) = 1 -> acceptance prob = min(1, p(t)) = p(t) (p is a valid prob).
+    acceptance_probs = selected_target_probs;
+  } else {
+    CHECK_EQ(draft_probs.dim(), 3)
+        << "probabilistic draft_probs must be [batch, n_spec, vocab], got "
+        << draft_probs.sizes();
+    auto selected_draft_probs =
+        index_select_2d(draft_probs, /*dim=*/-1, draft_token_ids);
+    acceptance_probs = selected_target_probs / selected_draft_probs;
+  }
   auto accepted = (uniform_rand < acceptance_probs);
 
-  // construct recovered probs
+  // construct recovered probs = normalize((p - q)+)
   auto recovered_probs = target_probs.clone();
-  if (use_selected_only_draft_probs) {
-    recovered_probs.scatter_(/*dim=*/-1,
-                             draft_token_ids.unsqueeze(-1),
-                             torch::zeros_like(selected_draft_probs)
-                                 .unsqueeze(-1)
-                                 .to(recovered_probs.dtype()));
+  if (no_draft_probs) {
+    // (p - onehot_t)+ : zero out the draft token, keep p elsewhere.
+    recovered_probs.scatter_(
+        /*dim=*/-1,
+        draft_token_ids.unsqueeze(-1),
+        torch::zeros_like(draft_token_ids)
+            .unsqueeze(-1)
+            .to(recovered_probs.dtype()));
   } else {
     recovered_probs.sub_(draft_probs).clamp_min_(0);
   }
@@ -258,8 +339,8 @@ std::tuple<torch::Tensor, torch::Tensor> RejectionSampler::random_sample_fused(
     bool mask_out_rejected_tokens) {
   CHECK_EQ(draft_probs.dim(), 3)
       << "Fused rejection sampler requires dense draft_probs [batch, n_spec, "
-         "vocab]. Ensure validate passes dense draft_probs, for example with "
-         "--enable_opt_validate_probs=false.";
+         "vocab]. Ensure validate passes dense draft_probs, i.e. run with "
+         "--enable_probabilistic_draft=true.";
 
   const auto device = draft_token_ids.device();
   const int64_t batch_size = draft_token_ids.size(0);

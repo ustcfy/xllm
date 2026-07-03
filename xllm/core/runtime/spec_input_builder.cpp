@@ -468,40 +468,41 @@ std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
     const std::vector<torch::Tensor>& draft_probs_steps,
     int32_t batch_size,
     int32_t vocab_size,
-    bool enable_opt_validate_probs) {
+    bool enable_probabilistic_draft) {
   CHECK_GT(batch_size, 0) << "batch_size must be > 0";
   CHECK_GT(vocab_size, 0) << "vocab_size must be > 0";
-  CHECK_EQ(draft_token_ids_steps.size(), draft_probs_steps.size())
-      << "draft steps mismatch";
   CHECK(!draft_token_ids_steps.empty()) << "draft steps must not be empty";
 
   std::vector<torch::Tensor> token_ids_vec;
-  std::vector<torch::Tensor> probs_vec;
   token_ids_vec.reserve(draft_token_ids_steps.size());
-  probs_vec.reserve(draft_probs_steps.size());
+  for (const auto& step_ids : draft_token_ids_steps) {
+    token_ids_vec.emplace_back(step_ids.view({batch_size, 1}).to(torch::kLong));
+  }
+  auto draft_token_ids = torch::cat(token_ids_vec, /*dim=*/1);
 
-  for (size_t i = 0; i < draft_token_ids_steps.size(); ++i) {
-    auto draft_token_ids =
-        draft_token_ids_steps[i].view({batch_size, 1}).to(torch::kLong);
-    auto selected_probs =
-        extract_selected_probs(draft_probs_steps[i], draft_token_ids)
-            .view({batch_size, 1});
-
-    token_ids_vec.emplace_back(draft_token_ids);
-    if (enable_opt_validate_probs) {
-      probs_vec.emplace_back(selected_probs);
-    } else {
-      auto dense_probs =
-          torch::zeros({batch_size, 1, vocab_size}, selected_probs.options());
-      dense_probs.scatter_(
-          /*dim=*/-1,
-          draft_token_ids.unsqueeze(-1),
-          selected_probs.unsqueeze(-1));
-      probs_vec.emplace_back(dense_probs);
-    }
+  // greedy (NO_DRAFT_PROBS): the draft is argmax so q is a point mass; the
+  // rejection sampler treats q=1 and zeroes the draft token in the residual.
+  // No draft probabilities are needed -- return an undefined tensor.
+  if (!enable_probabilistic_draft) {
+    return {draft_token_ids, torch::Tensor()};
   }
 
-  auto draft_token_ids = torch::cat(token_ids_vec, /*dim=*/1);
+  // probabilistic: carry the full dense draft distribution [batch, n_spec,
+  // vocab] to validate so rejection uses the exact (p-q)+ residual. Requires
+  // draft_probs_steps to be the full per-step softmax [batch, vocab] (NOT
+  // compressed to selected-only scalars upstream).
+  CHECK_EQ(draft_token_ids_steps.size(), draft_probs_steps.size())
+      << "draft steps mismatch";
+  std::vector<torch::Tensor> probs_vec;
+  probs_vec.reserve(draft_probs_steps.size());
+  for (const auto& step_probs : draft_probs_steps) {
+    CHECK_EQ(step_probs.dim(), 2)
+        << "probabilistic draft requires full dense probs [batch, vocab], got "
+        << step_probs.sizes();
+    CHECK_EQ(step_probs.size(1), vocab_size)
+        << "probabilistic draft probs vocab mismatch";
+    probs_vec.emplace_back(step_probs.view({batch_size, 1, vocab_size}));
+  }
   auto draft_probs = torch::cat(probs_vec, /*dim=*/1);
   return {draft_token_ids, draft_probs};
 }

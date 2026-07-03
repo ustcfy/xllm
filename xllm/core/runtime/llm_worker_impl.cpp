@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -316,12 +317,34 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 
   // driver prepare model output
   if (sampling_params.selected_token_idxes.defined()) {
-    output.logits = logits;
+    // sampler_->forward below mutates `logits` in place. Only the speculative
+    // TARGET's output.logits has a downstream consumer (validate re-applies
+    // sampling params from RAW logits in the RejectionSampler), so the target
+    // must clone to preserve raw values. All other paths alias to avoid a
+    // per-step full-vocab copy on the decode hot path.
+    const bool is_spec_target =
+        options_.enable_speculative_decode() && !is_spec_draft_;
+    output.logits = is_spec_target ? logits.clone() : logits;
     output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (!input.skip_sampling_for_logits_only) {
-      auto sample_output = sampler_->forward(logits, sampling_params);
+      // Speculative greedy default: force the draft proposer to argmax so q is
+      // a point mass (NO_DRAFT_PROBS). Only q's shape matters -- correctness
+      // rides on target-side shaping (Leviathan 2023). Skip when probabilistic
+      // draft is enabled (draft samples from its own distribution).
+      const bool force_greedy_draft =
+          is_spec_draft_ &&
+          !SpeculativeConfig::get_instance().enable_probabilistic_draft();
+      SampleOutput sample_output;
+      if (force_greedy_draft) {
+        SamplingParameters draft_params = sampling_params;
+        draft_params.all_greedy_sample = true;
+        draft_params.all_random_sample = false;
+        sample_output = sampler_->forward(logits, draft_params);
+      } else {
+        sample_output = sampler_->forward(logits, sampling_params);
+      }
 
       // beam search kernel
       BeamSearchOutput beam_search_output;

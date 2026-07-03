@@ -54,7 +54,7 @@ Eagle3WorkerImpl::Eagle3WorkerImpl(const ParallelArgs& parallel_args,
                     eagle3_main_options(options),
                     eagle3_draft_options(options),
                     ::xllm::SpeculativeConfig::get_instance()
-                        .enable_opt_validate_probs()) {}
+                        .enable_probabilistic_draft()) {}
 
 bool Eagle3WorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,

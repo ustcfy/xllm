@@ -77,7 +77,7 @@ DECLARE_int32(num_speculative_tokens);
 
 DECLARE_string(speculative_algorithm);
 
-DECLARE_bool(enable_opt_validate_probs);
+DECLARE_bool(enable_probabilistic_draft);
 
 DECLARE_int32(speculative_suffix_cache_max_depth);
 
