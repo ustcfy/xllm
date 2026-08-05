@@ -1,0 +1,42 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # 每天 UTC 18:00 = 北京时间 02:00
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream/main
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/xLLM-AI/xllm.git
+          git fetch upstream main
+          before=$(git rev-parse HEAD)
+          # --no-edit: upstream 新提交合入,保留本仓库独有的自动化提交(本 workflow)
+          git merge --no-edit upstream/main
+          after=$(git rev-parse HEAD)
+          if [ "$before" = "$after" ]; then
+            echo "Already up to date with upstream."
+          else
+            git push origin main
+            echo "Synced upstream -> fork main."
+          fi
