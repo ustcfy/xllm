@@ -12,6 +12,8 @@ if(USE_NPU)
       absl::time
       GTest::gtest_main
       xllm_atb_layers
+      opapi
+      atb_customize
       nnopbase
       ascendcl
       atb
