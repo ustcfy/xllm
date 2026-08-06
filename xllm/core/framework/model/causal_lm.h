@@ -173,7 +173,7 @@ class CausalLM : public torch::nn::Module {
   // target hidden into the draft's per-layer KV cache. Not part of forward()
   // because it has no attention and its shape doesn't match forward's decode
   // graph; sits outside the executor to avoid a per-flag branch in the eager
-  // gate. Default: NOT_IMPLEMENTED. Overridden by DFlashDraftModel.
+  // gate. Default: NOT_IMPLEMENTED. Overridden by qwen3_dflash draft bodies.
   virtual ModelOutput write_context_kv(const torch::Tensor& target_hidden,
                                        const torch::Tensor& positions,
                                        const torch::Tensor& device_cache_slots,

@@ -29,6 +29,7 @@ limitations under the License.
 #include <random>
 #include <sstream>
 
+#include "common/constants.h"
 #include "common/global_flags.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/execution_config.h"

@@ -19,6 +19,8 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/layers/npu/npu_deepseek_v32_decoder_layer_impl.h"
 #include "deepseek_v32.h"
 #include "models/llm/npu/glm_shared_expert_stream.h"
@@ -82,6 +84,11 @@ class GlmMoeDsaModelImpl : private GlmSharedExpertStreamOwner,
     for (int i = 0; i < parallel_args.world_size(); i += dp_stride) {
       indices.push_back(i);
     }
+
+    aux_capture_.emplace(
+        model_args,
+        options,
+        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   ModelOutput forward(torch::Tensor tokens,
@@ -127,6 +134,10 @@ class GlmMoeDsaModelImpl : private GlmSharedExpertStreamOwner,
       if (!input_params.synchronize_layer(i)) {
         return ModelOutput();
       }
+
+      // ATB fused add-norm keeps `h` as the full residual, so pass no
+      // separate residual. No-op unless this is a DFlash target.
+      aux_capture_->capture_layer(static_cast<int64_t>(i), h, std::nullopt);
 
       auto& layer = layers_[i];
       const int32_t layer_index = static_cast<int32_t>(i);
@@ -186,7 +197,8 @@ class GlmMoeDsaModelImpl : private GlmSharedExpertStreamOwner,
     if (cp_plan.enabled()) {
       h = cp_plan.merge_model_output(h);
     }
-    return ModelOutput(norm_(h, 0));
+    torch::Tensor hidden_states = norm_(h, 0);
+    return aux_capture_->finalize(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -307,6 +319,8 @@ class GlmMoeDsaModelImpl : private GlmSharedExpertStreamOwner,
   layer::AttentionMask attn_mask_;
   layer::NpuRMSNorm norm_{nullptr};
   RollingLoadManager* rolling_mgr_ = nullptr;
+  // DFlash aux-hidden capture (empty/false for a non-DFlash-target run).
+  std::optional<AuxHiddenCapture> aux_capture_;
 };
 TORCH_MODULE(GlmMoeDsaModel);
 
@@ -396,6 +410,11 @@ REGISTER_MODEL_ARGS(
       LOAD_ARG_OR(indexer_rope_interleave, "indexer_rope_interleave", true);
       LOAD_ARG_OR(rope_theta, "rope_theta", args->rope_theta());
       LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
+
+      // DFlash/Eagle3 target aux-hidden capture layers; the worker overrides
+      // this from the draft config for DFlash. Defaults to empty when absent.
+      LOAD_ARG_OR(
+          layers_to_capture, "layers_to_capture", std::vector<int32_t>{});
 
       SET_ARG(head_dim, args->qk_nope_head_dim() + args->qk_rope_head_dim());
       LOAD_ARG_OR_FUNC(

@@ -212,6 +212,17 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
       ForwardInput& input,
       const std::vector<EmbeddingCache::DecodeState>& last_states) const;
 
+  // True for Qwen3.5 hybrid targets, whose GDN layer requires the chunked-
+  // prefill spec-verify path instead of the base-class DECODE flattening.
+  bool use_qwen3_5_spec_verify_path() const;
+
+  // Draft-body TP degree, read from the draft's own ParallelArgs so a future
+  // TP1-draft flag (MTP has one) would be honoured.
+  int64_t draft_kv_cache_world_size() const;
+
+  void prepare_qwen3_5_validate_inputs(const ForwardInput& input,
+                                       ForwardInput& validate_input);
+
   void write_context_kv(const ForwardInput& input,
                         const torch::Tensor& context_hidden,
                         const torch::Tensor& positions_device,

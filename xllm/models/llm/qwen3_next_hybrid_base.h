@@ -24,7 +24,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/flash_comm1_context.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
@@ -91,6 +93,10 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
                                             options.dtype().toScalarType(),
                                             /*mask_value=*/1);
     dp_size_ = parallel_args.dp_size();
+    aux_capture_.emplace(
+        model_args_,
+        options,
+        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   // tokens: [num_tokens]
@@ -169,6 +175,9 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
         attn_metadata.unshared_plan_info->layer_id = static_cast<int32_t>(i);
       }
 #endif
+      // No-op unless this is a DFlash target. GDN and full-attention layers
+      // share residual-stream semantics, so a single capture site works.
+      aux_capture_->capture_layer(static_cast<int64_t>(i), h, residual);
       auto& layer = layers_[i];
       h = layer->forward(h,
                          residual,
@@ -186,11 +195,12 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 #endif
     }
     auto [hidden_states, residual_out] = norm_->forward(h, residual);
-    h = hidden_states;
-    if (is_sequence_sharded(fc1_ctx)) {
-      h = gather_sequence(h, fc1_ctx);
+    h = gather_sequence(hidden_states, fc1_ctx);
+    ModelOutput out = aux_capture_->finalize(h);
+    if (out.aux_hidden_states.defined()) {
+      out.aux_hidden_states = gather_sequence(out.aux_hidden_states, fc1_ctx);
     }
-    return ModelOutput(h);
+    return out;
   }
 
   // load the weight from the checkpoint
@@ -285,6 +295,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
   layer::AttentionMask attn_mask_;
   layer::AttentionMask dense_attn_mask_;
   layer::WordEmbedding embed_tokens_{nullptr};
+  // DFlash aux-hidden capture (empty/false for a non-DFlash-target run).
+  std::optional<AuxHiddenCapture> aux_capture_;
 };
 
 class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
@@ -305,24 +317,24 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
   }
 
   // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
+  // selected_idxes: [num_tokens]
   // returns: [num_tokens, vocab_size]
   torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
+                       const torch::Tensor& selected_idxes) {
     auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
+    if (selected_idxes.defined()) {
+      h = h.index_select(/*dim=*/0, selected_idxes);
     }
     return lm_head_(h);
   }
 
   // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
+  // selected_idxes: [num_tokens]
   torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
+                       const torch::Tensor& selected_idxes) {
     auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
+    if (selected_idxes.defined()) {
+      h = h.index_select(/*dim=*/0, selected_idxes);
     }
     namespace F = torch::nn::functional;
     return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));

@@ -119,11 +119,13 @@ bool resolve_model_registration(const std::string& model_type,
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
   } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
-             model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
-             model_type == "qwen3_vl" || model_type == "deepseek_v32_mtp") {
-    // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/qwen3_vl/deepseek_v32_mtp
-    // support both backends. qwen3_vl on TORCH is used by the Python model
-    // executor (--model_impl=python implements its own ViT + deepstack).
+             model_type == "qwen3_dflash" || model_type == "deepseek_v32" ||
+             model_type == "glm_moe_dsa" || model_type == "qwen3_vl" ||
+             model_type == "deepseek_v32_mtp") {
+    // qwen3/qwen3_moe/qwen3_dflash/deepseek_v32/glm_moe_dsa/qwen3_vl/
+    // deepseek_v32_mtp support both backends. qwen3_vl on TORCH is used by the
+    // Python model executor (--model_impl=python implements its own ViT +
+    // deepstack).
   } else if (is_torch_only_model_type(model_type)) {
     if (backend != kTorchBackend) {
       if (error_message != nullptr) {
@@ -153,6 +155,8 @@ bool resolve_model_registration(const std::string& model_type,
     *resolved_name = "qwen2_5_vl_atb";
   } else if (model_type == "qwen3_vl" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_vl_atb";
+  } else if (model_type == "qwen3_dflash" && effective_backend == kAtbBackend) {
+    *resolved_name = "qwen3_dflash_atb";
   } else {
     *resolved_name = model_type;
   }

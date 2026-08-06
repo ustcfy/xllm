@@ -1613,7 +1613,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       const bool is_deepseek_v4_dspark =
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
       std::string draft_model_type =
-          is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+          is_dspark ? "DSparkDraftModel" : "qwen3_dflash";
       if (is_deepseek_v4_dspark) {
         draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
       }
