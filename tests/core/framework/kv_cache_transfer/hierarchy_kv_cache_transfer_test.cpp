@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -100,8 +101,13 @@ TEST(HierarchyKVCacheTransferTest,
       .layers(1)
       .host_blocks_factor(kHostBlocksFactor)
       .layers_wise_copy_batchs(1);
-  HierarchyKVCacheTransfer transfer(
-      transfer_options, device.unwrap(), &caches, cache_shape, create_options);
+  std::unique_ptr<Stream> compute_stream = device.current_stream();
+  HierarchyKVCacheTransfer transfer(transfer_options,
+                                    device.unwrap(),
+                                    compute_stream.get(),
+                                    &caches,
+                                    cache_shape,
+                                    create_options);
 
   BlockTransferInfo offload_info(kSourceBlockId, /*dst_block_id=*/0);
   offload_info.block_type = BlockType::KV;
@@ -111,7 +117,7 @@ TEST(HierarchyKVCacheTransferTest,
   BlockTransferInfo load_info(/*src_block_id=*/0, kDestinationBlockId);
   load_info.block_type = BlockType::KV;
   load_info.transfer_type = TransferType::H2D;
-  EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {load_info}), 0U);
+  EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {load_info}), 1U);
 
   ModelInputParams params;
   params.meta.batch_id = kBatchId;

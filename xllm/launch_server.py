@@ -290,8 +290,7 @@ def _detect_device_count(parser: argparse.ArgumentParser) -> int:
     """Number of local nodes (cards) on this machine, from the device count.
 
     Each machine hosts one node per visible device (matching multi_machine.md),
-    and the visible set is controlled by the accelerator's *_VISIBLE_DEVICES
-    env mask, which Platform.get_device_count() honors.
+    reported by Platform.get_device_count() via the framework runtime.
     """
     # Imported lazily so the common launch path keeps a light import surface
     # and only touches the auto_config package (and its device probing) when a
@@ -302,9 +301,9 @@ def _detect_device_count(parser: argparse.ArgumentParser) -> int:
     if device_count is None or device_count < 1:
         parser.error(
             "could not detect the local device count for a multi-machine "
-            "launch (--machine-rank is set); set the accelerator's "
-            "*_VISIBLE_DEVICES env mask (e.g. ASCEND_RT_VISIBLE_DEVICES / "
-            "CUDA_VISIBLE_DEVICES) so the device count is discoverable."
+            "launch (--machine-rank is set); this requires the framework "
+            "runtime (torch) to be importable so the device count is "
+            "discoverable."
         )
     return device_count
 

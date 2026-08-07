@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <numeric>
 #include <optional>
@@ -196,6 +197,32 @@ inline std::string get_model_name(
   }
 
   return model_name;
+}
+
+inline std::string get_model_repository_name(
+    const std::filesystem::path& normalized_model_path) {
+  std::filesystem::path version_path = normalized_model_path;
+  if (!version_path.has_filename()) {
+    version_path = version_path.parent_path();
+  }
+
+  const std::string model_version = version_path.filename().string();
+  const bool is_numeric_version =
+      !model_version.empty() &&
+      std::all_of(
+          model_version.begin(), model_version.end(), [](char character) {
+            return std::isdigit(static_cast<unsigned char>(character)) != 0;
+          });
+  if (!is_numeric_version) {
+    return get_model_name(normalized_model_path);
+  }
+
+  const std::string repository_name =
+      version_path.parent_path().filename().string();
+  if (repository_name.empty()) {
+    return get_model_name(normalized_model_path);
+  }
+  return repository_name;
 }
 
 inline std::string get_model_backend(const std::filesystem::path& model_path) {

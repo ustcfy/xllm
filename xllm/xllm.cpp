@@ -434,6 +434,8 @@ int run() {
   std::filesystem::path model_path =
       std::filesystem::path(model_config.model()).lexically_normal();
   const std::string default_model_name = xllm::util::get_model_name(model_path);
+  const std::string model_repository_name =
+      xllm::util::get_model_repository_name(model_path);
 
   if (model_config.model_id().empty()) {
     // use last part of the path as model id
@@ -548,12 +550,13 @@ int run() {
 
   // supported models
   std::vector<std::string> model_names = {model_config.model_id()};
+  std::vector<std::string> model_repository_names = {model_repository_name};
   std::string model_version = default_model_name;
   std::vector<std::string> model_versions = {model_version};
 
   if (distributed_config.node_rank() == 0 || kv_cache_config.enable_xtensor()) {
-    auto api_service =
-        std::make_unique<APIService>(master.get(), model_names, model_versions);
+    auto api_service = std::make_unique<APIService>(
+        master.get(), model_names, model_repository_names, model_versions);
     auto xllm_server =
         ServerRegistry::get_instance().register_server("HttpServer");
 

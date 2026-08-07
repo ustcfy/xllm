@@ -117,7 +117,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
       model_.get(), context.get_model_args(), device_, options_);
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    eplb_executor_ = std::make_unique<EplbExecutor>(model_.get(), device_);
+    eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
   }
 
   if (::xllm::BeamSearchConfig::get_instance().enable_beam_search_kernel()) {
@@ -223,7 +223,7 @@ LLMWorkerImpl::step_async_no_sync(const ForwardInput& input) {
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MLU)
   // Restore live recurrent-state slots from saved checkpoints here (worker
   // thread, on compute_stream_) instead of in prepare_work_before_execute on
   // prepare_stream_. The single-threaded worker pool guarantees the previous
@@ -232,10 +232,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
   // after those writes without needing a cross-stream barrier.
   if (has_linear_attention_layers(context_.get_model_args())) {
     c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
-    auto& mutable_params = const_cast<ModelInputParams&>(input.input_params);
+    ModelInputParams& mutable_params =
+        const_cast<ModelInputParams&>(input.input_params);
     restore_linear_state_slots(kv_caches_,
                                mutable_params.linear_state_cache_ops,
-                               mutable_params.parallel.has_initial_state);
+                               mutable_params.linear_state_validity_mask);
   }
 #endif
   return execute_no_sync_on_stream(input, *compute_stream_);
@@ -291,12 +292,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     CHECK(kv_transfers.wait()) << "KV cache push failed";
   };
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    eplb_executor_->eplb_execute(input.input_params.expert.eplb_info);
+    eplb_executor_->start_eplb_step(input.input_params.expert.eplb_info);
   }
 
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
+  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+    eplb_executor_->finish_eplb_step();
+  }
   if (!model_output.hidden_states.defined()) {
     wait_kv_push();
     return std::nullopt;
@@ -319,10 +323,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   output.mtp_topk_state = std::move(model_output.mtp_topk_state);
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     output.expert_load_data = expert_load_data_;
-    output.prepared_layer_id = eplb_executor_->get_ready_layer_id();
-    if (output.prepared_layer_id != -1) {
-      eplb_executor_->reset_ready_layer_id();
-    }
+    output.prepared_token = eplb_executor_->consume_ready_prepare_token();
   }
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&

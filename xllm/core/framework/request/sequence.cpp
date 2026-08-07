@@ -277,6 +277,8 @@ Sequence::Sequence(const Sequence& other)
     : index_(other.index_),
       kv_state_(other.kv_state_),
       host_kv_state_(other.host_kv_state_),
+      effective_restore_tokens_(other.effective_restore_tokens_),
+      host_cache_copy_units_(other.host_cache_copy_units_),
       latest_generate_time_(other.latest_generate_time_),
       time_to_first_token_latency_seconds_(
           other.time_to_first_token_latency_seconds_),
@@ -749,10 +751,34 @@ size_t Sequence::num_prefix_cache_tokens() const {
   return cached_tokens;
 }
 
+void Sequence::set_host_cache_match(size_t restore_tokens, size_t copy_units) {
+  CHECK_GE(restore_tokens, kv_state_.kv_cache_tokens_num());
+  CHECK_GE(restore_tokens, host_kv_state_.kv_cache_tokens_num());
+  effective_restore_tokens_ = restore_tokens;
+  host_cache_copy_units_ = copy_units;
+}
+
+void Sequence::set_host_cache_restore(size_t restore_tokens,
+                                      size_t copy_units) {
+  const size_t matched_tokens = kv_cache_tokens_num();
+  CHECK_GE(restore_tokens, kv_state_.kv_cache_tokens_num());
+  CHECK_GE(restore_tokens, host_kv_state_.kv_cache_tokens_num());
+  CHECK_LE(restore_tokens, matched_tokens);
+  CHECK_LE(copy_units, host_cache_copy_units_);
+  effective_restore_tokens_ = restore_tokens;
+  host_cache_copy_units_ = copy_units;
+}
+
+void Sequence::clear_host_cache_match() {
+  effective_restore_tokens_.reset();
+  host_cache_copy_units_ = 0;
+}
+
 // release all cache blocks
 void Sequence::reset() {
   kv_state_.reset();
   host_kv_state_.reset();
+  clear_host_cache_match();
   timer_.reset();
   is_timeout_set_ = false;
   volatile_num_prompt_tokens_ = num_tokens_;
@@ -895,10 +921,14 @@ size_t Sequence::get_decodable_token_count(size_t size) const {
 }
 
 int64_t Sequence::tbt(const absl::Time& now) {
+  return (tbt_microseconds(now) + 500) / 1000;
+}
+
+int64_t Sequence::tbt_microseconds(const absl::Time& now) {
   const int64_t latency =
-      absl::ToInt64Milliseconds(now - latest_generate_time_);
+      absl::ToInt64Microseconds(now - latest_generate_time_);
   latest_generate_time_ = now;
-  // Reset the committed-token counter so the next tbt() interval amortizes only
+  // Reset the committed-token counter so the next tbt interval amortizes only
   // the tokens generated within that interval.
   generated_tokens_since_latency_ = 0;
   return latency;

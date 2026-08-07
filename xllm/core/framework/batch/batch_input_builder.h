@@ -23,6 +23,7 @@ limitations under the License.
 #include <limits>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "core/framework/multimodal/mm_data.h"
@@ -53,6 +54,10 @@ class BatchInputBuilder {
   ForwardInput build_forward_input(uint32_t num_decoding_tokens,
                                    uint32_t min_decoding_batch_size);
 
+  std::vector<Block> take_linear_restore_src_blocks() {
+    return std::move(state_.linear_restore_src_blocks);
+  }
+
  private:
   friend class BatchInputBuilderTestPeer;
 
@@ -65,19 +70,9 @@ class BatchInputBuilder {
 
   static TransferKVInfo build_step_transfer_info(
       const TransferKVInfo& full_info,
-      const std::vector<uint64_t>& local_block_ids,
-      size_t next_transfer_block_idx,
+      Sequence* sequence,
       uint32_t seq_len,
-      uint32_t block_size,
-      size_t* advanced_transfer_block_idx);
-
-  static KVBlockTransferGroup build_group_step_transfer(
-      const KVBlockTransferGroup& full_group,
-      const std::vector<int32_t>& local_block_ids,
-      size_t next_transfer_block_idx,
-      uint32_t seq_len,
-      uint32_t block_size,
-      size_t* advanced_transfer_block_idx);
+      uint32_t kv_split_size);
 
   void process_swap_block_infos(ForwardInput& forward_input);
 
@@ -128,6 +123,7 @@ class BatchInputBuilder {
     std::vector<int32_t> embedding_ids;
     std::vector<int32_t> linear_state_ids;
     std::vector<LinearStateCacheOp> linear_state_cache_ops;
+    std::vector<Block> linear_restore_src_blocks;
     std::vector<std::string> request_ids;
     std::vector<int32_t> extra_token_ids;
     std::vector<int32_t> mtp_shifted_token_ids;

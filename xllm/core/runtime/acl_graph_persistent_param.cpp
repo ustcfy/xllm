@@ -1290,9 +1290,9 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       graph_params->embedding.linear_state_indices =
           persistent_linear_state_indices(
               static_cast<uint32_t>(padded_batch_size));
-      graph_params->parallel.has_initial_state =
-          params.parallel.has_initial_state;
-      graph_params->parallel.has_initial_state.resize(
+      graph_params->linear_state_validity_mask =
+          params.linear_state_validity_mask;
+      graph_params->linear_state_validity_mask.resize(
           static_cast<size_t>(padded_batch_size), 0);
     }
 
@@ -1358,13 +1358,13 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                        padded_q_seq_lens_vec[static_cast<size_t>(i)]);
     }
 
-    if (!params.parallel.has_initial_state.empty()) {
-      auto& his = graph_params->parallel.has_initial_state;
-      his = params.parallel.has_initial_state;
-      if (his.size() > static_cast<size_t>(actual_batch_size)) {
-        his.resize(static_cast<size_t>(actual_batch_size));
+    if (!params.linear_state_validity_mask.empty()) {
+      auto& validity_mask = graph_params->linear_state_validity_mask;
+      validity_mask = params.linear_state_validity_mask;
+      if (validity_mask.size() > static_cast<size_t>(actual_batch_size)) {
+        validity_mask.resize(static_cast<size_t>(actual_batch_size));
       }
-      his.resize(static_cast<size_t>(padded_batch_size), 0);
+      validity_mask.resize(static_cast<size_t>(padded_batch_size), 0);
     }
 
     if (params.num_accepted_tokens.defined() &&

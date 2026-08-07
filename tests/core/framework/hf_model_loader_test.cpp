@@ -137,6 +137,13 @@ TEST(HFModelLoaderTest, Qwen35MoeBackendAwareModelTypeSelection) {
             "qwen3_5_moe");
 }
 
+#if defined(USE_MLU)
+TEST(HFModelLoaderTest, Qwen35MoeRootTypeHasCausalModelFactory) {
+  CausalLMFactory factory = ModelRegistry::get_causallm_factory("qwen3_5_moe");
+  EXPECT_TRUE(static_cast<bool>(factory));
+}
+#endif
+
 TEST(HFModelLoaderTest, LoadCompressedTensorsFp8StaticConfig) {
   JsonReader reader;
   ASSERT_TRUE(reader.parse_text(R"json(
