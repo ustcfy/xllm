@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 
 #include "util/threadpool.h"
 
@@ -37,11 +38,11 @@ TEST(BlockingCounterTest, TwoThreadTest) {
 
   std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     called.fetch_add(1, std::memory_order_relaxed);
+    counter.decrement_count();
   });
-  counter.decrement_count();
   called.fetch_add(1, std::memory_order_relaxed);
+  counter.decrement_count();
   counter.wait();
   EXPECT_EQ(2, called.load(std::memory_order_relaxed));
 }
@@ -52,23 +53,23 @@ TEST(BlockingCounterTest, MultiThreadTest) {
 
   std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     called.fetch_add(1, std::memory_order_relaxed);
+    counter.decrement_count();
   });
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     called.fetch_add(1, std::memory_order_relaxed);
+    counter.decrement_count();
   });
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     called.fetch_add(1, std::memory_order_relaxed);
+    counter.decrement_count();
   });
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     called.fetch_add(1, std::memory_order_relaxed);
+    counter.decrement_count();
   });
-  counter.decrement_count();
   called.fetch_add(1, std::memory_order_relaxed);
+  counter.decrement_count();
 
   counter.wait();
   EXPECT_EQ(5, called.load(std::memory_order_relaxed));
@@ -80,12 +81,12 @@ TEST(BlockingCounterTest, WaitTimeoutTest) {
 
   std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     called.fetch_add(1, std::memory_order_relaxed);
+    counter.decrement_count();
   });
 
-  counter.decrement_count();
   called.fetch_add(1, std::memory_order_relaxed);
+  counter.decrement_count();
 
   const std::chrono::milliseconds timeout(100);
   EXPECT_FALSE(counter.wait_for(timeout));
