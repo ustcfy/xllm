@@ -23,11 +23,13 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "batch_input_builder.h"
 #include "core/framework/config/scheduler_config.h"
+#include "framework/batch/beam_search.h"
 #include "framework/block/block.h"
 #include "framework/block/block_manager_impl.h"
 #include "framework/block/block_manager_pool.h"
@@ -246,6 +248,36 @@ class ScopedPrefillChunkStride final {
 };
 
 }  // namespace
+
+TEST(SimpleTopKOptimizerTest, GetTopKMoveReturnsOwnedCandidates) {
+  static_assert(
+      std::is_same_v<decltype(std::declval<SimpleTopKOptimizerBeamCandidate&>()
+                                  .getTopKMove()),
+                     std::vector<BeamCandidate>>);
+
+  SimpleTopKOptimizerBeamCandidate optimizer(/*k=*/2);
+  BeamCandidate first_candidate;
+  first_candidate.source_index = 1;
+  first_candidate.logprob_sum = 1.0f;
+  optimizer.insert(std::move(first_candidate));
+
+  BeamCandidate second_candidate;
+  second_candidate.source_index = 2;
+  second_candidate.logprob_sum = 2.0f;
+  optimizer.insert(std::move(second_candidate));
+
+  BeamCandidate third_candidate;
+  third_candidate.source_index = 3;
+  third_candidate.logprob_sum = 3.0f;
+  optimizer.insert(std::move(third_candidate));
+
+  const std::vector<BeamCandidate> candidates = optimizer.getTopKMove();
+
+  ASSERT_EQ(candidates.size(), 2u);
+  EXPECT_EQ(candidates[0].source_index, 2u);
+  EXPECT_EQ(candidates[1].source_index, 3u);
+  EXPECT_TRUE(optimizer.empty());
+}
 
 TEST(BatchInputBuilderTest, FirstChunkUsesRemotePrefix) {
   BlockManager::Options options;

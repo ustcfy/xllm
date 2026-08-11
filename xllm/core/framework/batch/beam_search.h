@@ -97,18 +97,7 @@ class SimpleTopKOptimizer {
     return result;
   }
 
-  std::vector<CandidateType>&& getTopKMove() {
-    std::vector<CandidateType> result;
-    result.reserve(min_heap_.size());
-
-    while (!min_heap_.empty()) {
-      result.emplace_back(
-          std::move(const_cast<CandidateType&>(min_heap_.top())));
-      min_heap_.pop();
-    }
-
-    return std::move(result);
-  }
+  std::vector<CandidateType> getTopKMove() { return getTopK(); }
 
   std::vector<CandidateType> getTopKSorted() {
     std::vector<CandidateType> result = getTopK();
