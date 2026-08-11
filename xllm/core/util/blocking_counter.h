@@ -52,15 +52,11 @@ class BlockingCounter {
   // zero before the timeout expired.
   inline bool wait_for(std::chrono::milliseconds ms) {
     unsigned int v = state_.fetch_or(1, std::memory_order_acq_rel);
-    if ((v >> 1) == 0) return true;
-    std::unique_lock<std::mutex> lock(mu_);
-    while (!notified_) {
-      const std::cv_status status = cond_var_.wait_for(lock, ms);
-      if (status == std::cv_status::timeout) {
-        return false;
-      }
+    if ((v >> 1) == 0) {
+      return true;
     }
-    return true;
+    std::unique_lock<std::mutex> lock(mu_);
+    return cond_var_.wait_for(lock, ms, [this] { return notified_; });
   }
 
  private:

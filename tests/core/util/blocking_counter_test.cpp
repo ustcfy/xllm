@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+
 #include "util/threadpool.h"
 
 namespace xllm {
@@ -25,68 +28,68 @@ TEST(BlockingCounterTest, BasicTest) {
   BlockingCounter counter(1);
   counter.decrement_count();
   counter.wait();
-  EXPECT_TRUE(true);
+  EXPECT_TRUE(counter.wait_for(std::chrono::milliseconds(0)));
 }
 
 TEST(BlockingCounterTest, TwoThreadTest) {
   ThreadPool threadpool(1);
   BlockingCounter counter(2);
 
-  int called = 0;
+  std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
     counter.decrement_count();
-    ++called;
+    called.fetch_add(1, std::memory_order_relaxed);
   });
   counter.decrement_count();
-  ++called;
+  called.fetch_add(1, std::memory_order_relaxed);
   counter.wait();
-  EXPECT_EQ(2, called);
+  EXPECT_EQ(2, called.load(std::memory_order_relaxed));
 }
 
 TEST(BlockingCounterTest, MultiThreadTest) {
   ThreadPool threadpool(4);
   BlockingCounter counter(5);
 
-  int called = 0;
+  std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
     counter.decrement_count();
-    ++called;
+    called.fetch_add(1, std::memory_order_relaxed);
   });
   threadpool.schedule([&counter, &called]() {
     counter.decrement_count();
-    ++called;
+    called.fetch_add(1, std::memory_order_relaxed);
   });
   threadpool.schedule([&counter, &called]() {
     counter.decrement_count();
-    ++called;
+    called.fetch_add(1, std::memory_order_relaxed);
   });
   threadpool.schedule([&counter, &called]() {
     counter.decrement_count();
-    ++called;
+    called.fetch_add(1, std::memory_order_relaxed);
   });
   counter.decrement_count();
-  ++called;
+  called.fetch_add(1, std::memory_order_relaxed);
 
   counter.wait();
-  EXPECT_EQ(5, called);
+  EXPECT_EQ(5, called.load(std::memory_order_relaxed));
 }
 
 TEST(BlockingCounterTest, WaitTimeoutTest) {
   ThreadPool threadpool(2);
   BlockingCounter counter(3);
 
-  int called = 0;
+  std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
     counter.decrement_count();
-    ++called;
+    called.fetch_add(1, std::memory_order_relaxed);
   });
 
   counter.decrement_count();
-  ++called;
+  called.fetch_add(1, std::memory_order_relaxed);
 
   const std::chrono::milliseconds timeout(100);
-  counter.wait_for(timeout);
-  EXPECT_EQ(2, called);
+  EXPECT_FALSE(counter.wait_for(timeout));
+  EXPECT_EQ(2, called.load(std::memory_order_relaxed));
 }
 
 }  // namespace xllm
