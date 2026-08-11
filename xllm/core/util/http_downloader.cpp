@@ -58,20 +58,20 @@ bool HttpDownloader::fetch_data(
 }
 
 bool HttpDownloader::parse_url(const std::string& url, std::string& host) {
-  size_t pos = url.find("://");
-  if (pos == std::string::npos) {
-    LOG(ERROR) << " Invalid URL, missing protocol, url is" << url;
+  const size_t scheme_end = url.find("://");
+  if (scheme_end == std::string::npos) {
+    LOG(ERROR) << "Invalid URL, missing protocol, url is " << url;
     return false;
   }
 
-  size_t host_start = pos + 3;
-  pos = url.find('/', host_start);
-  if (pos == std::string::npos) {
-    LOG(ERROR) << "Invalid URL, no path is found, url is" << url;
+  const size_t host_start = scheme_end + 3;
+  const size_t host_end = url.find_first_of("/?#", host_start);
+  host = url.substr(host_start, host_end - host_start);
+  if (host.empty()) {
+    LOG(ERROR) << "Invalid URL, missing host, url is " << url;
     return false;
   }
 
-  host = url.substr(host_start, pos - host_start);
   return true;
 }
 

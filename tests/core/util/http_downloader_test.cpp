@@ -21,9 +21,53 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+
+class TestHttpDownloader final : public HttpDownloader {
+ public:
+  bool parse_url_for_test(const std::string& url, std::string& host) {
+    return parse_url(url, host);
+  }
+
+ private:
+  bool download(const std::string& /*host*/,
+                const std::string& /*url*/,
+                std::string& /*data*/,
+                const std::unordered_map<std::string, std::string>& /*headers*/)
+      override {
+    return false;
+  }
+};
+
+}  // namespace
+
 // ============================================================
 // parse_headers_json tests (pure function, no caching)
 // ============================================================
+
+TEST(HttpDownloaderTest, ParseUrlAcceptsHostWithoutPath) {
+  TestHttpDownloader downloader;
+  std::string host;
+
+  EXPECT_TRUE(downloader.parse_url_for_test("https://example.com", host));
+  EXPECT_EQ(host, "example.com");
+}
+
+TEST(HttpDownloaderTest, ParseUrlExcludesQueryAndFragmentFromHost) {
+  TestHttpDownloader downloader;
+  std::string host;
+
+  EXPECT_TRUE(downloader.parse_url_for_test(
+      "https://example.com?width=1024#preview", host));
+  EXPECT_EQ(host, "example.com");
+}
+
+TEST(HttpDownloaderTest, ParseUrlRejectsEmptyHost) {
+  TestHttpDownloader downloader;
+  std::string host;
+
+  EXPECT_FALSE(downloader.parse_url_for_test("https:///image.png", host));
+}
 
 TEST(ParseHeadersJsonTest, EmptyStringReturnsEmptyMap) {
   auto result = parse_headers_json("");
