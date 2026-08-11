@@ -43,6 +43,8 @@ struct StreamOutputMetadata {
 StreamOutputMetadata collect_stream_output_metadata(Request& request) {
   StreamOutputMetadata metadata;
   auto& sequences = request.sequences();
+  metadata.indexes.reserve(sequences.size());
+  metadata.num_tokens.reserve(sequences.size());
   for (size_t i = 0; i < sequences.size(); ++i) {
     auto& sequence = sequences[i];
     if (sequence->is_closed()) {
@@ -240,6 +242,7 @@ void AsyncResponseProcessor::process_stream_request(
 
       RequestOutput req_output;
       req_output.request_id = request->request_id();
+      req_output.outputs.reserve(indexes.size());
       for (size_t i = 0; i < indexes.size(); ++i) {
         const size_t index = indexes[i];
         const size_t size = num_tokens[i];
@@ -289,6 +292,7 @@ void AsyncResponseProcessor::batch_process_stream_requests(
       req_output->request_id = request->request_id();
       req_output->service_request_id = request->service_request_id();
       req_output->target_xservice_addr = request->source_xservice_addr();
+      req_output->outputs.reserve(indexes.size());
       for (size_t i = 0; i < indexes.size(); ++i) {
         const size_t index = indexes[i];
         const size_t size = num_tokens[i];
