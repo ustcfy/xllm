@@ -140,7 +140,7 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
   }
 
   brpc::ServerOptions options;
-  // TODO: enable arean message factory later.
+  // TODO: enable arena message factory later.
   // options.rpc_pb_message_factory =
   //    brpc::GetArenaRpcPBMessageFactory<1024 * 1024, 1024 * 1024 * 128>();
   options.idle_timeout_sec =

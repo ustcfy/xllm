@@ -68,7 +68,7 @@ class BlockCapacityGuard {
   uint32_t num_block() const { return kv_cache_manager_->num_blocks(); }
 
   uint32_t num_blocks_in_useless() const {
-    // TODO for mutil dp
+    // TODO for multiple DP
     return num_block() - kv_cache_manager_->num_used_blocks()[0];
   }
 
