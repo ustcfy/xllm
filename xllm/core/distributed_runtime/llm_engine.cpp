@@ -831,7 +831,7 @@ std::vector<folly::SemiFuture<uint32_t>> LLMEngine::transfer_kv_blocks(
                              ->transfer_kv_blocks(block_transfer_info));
   }
 
-  return std::move(futures);
+  return futures;
 }
 
 void LLMEngine::transfer_kv_blocks(
