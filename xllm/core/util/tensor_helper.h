@@ -169,17 +169,27 @@ inline bool safe_concat(const std::vector<torch::Tensor>& vec,
                         torch::Tensor& tar,
                         int64_t dim = 0) {
   auto check = [](const std::vector<torch::Tensor>& vec, int64_t dim) {
-    if (vec.empty()) return false;
+    if (vec.empty()) {
+      return false;
+    }
 
     const auto& ref = vec[0];
-    if (!ref.defined()) return false;
+    if (!ref.defined()) {
+      return false;
+    }
 
     const int64_t ndim = ref.dim();
-    if (ndim == 0) return false;
+    if (ndim == 0) {
+      return false;
+    }
 
-    if (dim < 0) dim += ndim;
+    if (dim < 0) {
+      dim += ndim;
+    }
 
-    if (dim >= ndim) return false;
+    if (dim >= ndim) {
+      return false;
+    }
 
     for (size_t i = 1; i < vec.size(); ++i) {
       const auto& t = vec[i];
@@ -193,7 +203,9 @@ inline bool safe_concat(const std::vector<torch::Tensor>& vec,
       }
 
       for (int64_t d = 0; d < ndim; ++d) {
-        if (d == dim) continue;
+        if (d == dim) {
+          continue;
+        }
         if (t.size(d) != ref.size(d)) {
           return false;
         }
