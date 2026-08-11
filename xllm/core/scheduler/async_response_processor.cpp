@@ -32,6 +32,40 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+
+struct StreamOutputMetadata {
+  std::vector<size_t> indexes;
+  std::vector<size_t> num_tokens;
+  bool has_open_sequence = false;
+};
+
+StreamOutputMetadata collect_stream_output_metadata(Request& request) {
+  StreamOutputMetadata metadata;
+  auto& sequences = request.sequences();
+  for (size_t i = 0; i < sequences.size(); ++i) {
+    auto& sequence = sequences[i];
+    if (sequence->is_closed()) {
+      // Skip already closed sequences.
+      continue;
+    }
+
+    metadata.has_open_sequence = true;
+    if (sequence->has_new_tokens_generated() || sequence->finished()) {
+      metadata.indexes.emplace_back(i);
+      metadata.num_tokens.emplace_back(sequence->num_tokens());
+    }
+
+    // Close the sequence after sending finish reason.
+    if (sequence->finished()) {
+      sequence->close();
+    }
+  }
+  return metadata;
+}
+
+}  // namespace
+
 AsyncResponseProcessor::AsyncResponseProcessor(
     const Tokenizer* tokenizer,
     const std::optional<InstanceRole>& role,
@@ -192,37 +226,16 @@ void AsyncResponseProcessor::process_stream_request(
     std::shared_ptr<Request> request) {
   CHECK(request->state().stream) << "request is not a streaming request";
 
-  std::vector<size_t> indexes;
-  std::vector<size_t> num_tokens;
-  bool is_all_seqs_closed = true;
-  for (size_t i = 0; i < request->sequences().size(); ++i) {
-    auto& seq = request->sequences()[i];
-    is_all_seqs_closed &= seq->is_closed();
-    if (seq->is_closed()) {
-      // skip already closed sequences
-      continue;
-    }
+  StreamOutputMetadata metadata = collect_stream_output_metadata(*request);
 
-    // check if the sequence has enough tokens to output
-    if (seq->has_new_tokens_generated() || seq->finished()) {
-      indexes.push_back(i);
-      num_tokens.push_back(seq->num_tokens());
-    }
-
-    // close the sequence after sending finish reason
-    if (seq->finished()) {
-      seq->close();
-    }
-  }
-
-  if (!is_all_seqs_closed) {
+  if (metadata.has_open_sequence) {
     // output the delta text til the end of the sequence to the client
 
     auto runnable = [cancel_request = cancel_request_,
                      request,
                      this,
-                     indexes = std::move(indexes),
-                     num_tokens = std::move(num_tokens)]() {
+                     indexes = std::move(metadata.indexes),
+                     num_tokens = std::move(metadata.num_tokens)]() {
       AUTO_COUNTER(responsing_latency_seconds_stream);
 
       RequestOutput req_output;
@@ -260,33 +273,14 @@ void AsyncResponseProcessor::batch_process_stream_requests(
     auto& request = requests[i];
     CHECK(request->state().stream) << "request is not a streaming request";
 
-    std::vector<size_t> indexes;
-    std::vector<size_t> num_tokens;
-    for (size_t i = 0; i < request->sequences().size(); ++i) {
-      auto& seq = request->sequences()[i];
-      if (seq->is_closed()) {
-        // skip already closed sequences
-        continue;
-      }
-
-      // check if the sequence has enough tokens to output
-      if (seq->has_new_tokens_generated() || seq->finished()) {
-        indexes.push_back(i);
-        num_tokens.push_back(seq->num_tokens());
-      }
-
-      // close the sequence after sending finish reason
-      if (seq->finished()) {
-        seq->close();
-      }
-    }
+    StreamOutputMetadata metadata = collect_stream_output_metadata(*request);
 
     // output the delta text til the end of the sequence to the client
     auto runnable = [this,
                      counter,
                      request,
-                     indexes = std::move(indexes),
-                     num_tokens = std::move(num_tokens),
+                     indexes = std::move(metadata.indexes),
+                     num_tokens = std::move(metadata.num_tokens),
                      req_output = &request_outputs[i]]() mutable {
       AUTO_COUNTER(responsing_latency_seconds_stream);
       const absl::Time response_start_time = absl::Now();
