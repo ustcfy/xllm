@@ -35,7 +35,7 @@ namespace net {
 namespace {
 
 std::mutex g_port_mutex;
-std::unordered_set<int> g_allocated_port_map;
+std::unordered_set<int> g_allocated_ports;
 
 std::string to_ip_addr(const sockaddr_in& addr) {
   char ip[INET_ADDRSTRLEN]{'\0'};
@@ -159,9 +159,9 @@ int get_local_free_port() {
     port = ntohs(addr.sin_port);
 
     ::close(fd);
-  } while (g_allocated_port_map.find(port) != g_allocated_port_map.end());
+  } while (g_allocated_ports.find(port) != g_allocated_ports.end());
 
-  g_allocated_port_map.insert(port);
+  g_allocated_ports.insert(port);
 
   return port;
 }
