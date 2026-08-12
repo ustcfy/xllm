@@ -186,7 +186,11 @@ int32_t SuffixDecodingCache::generate_seq_id(const std::string& req_id) {
   int32_t seq_id = 0;
   while (true) {
     seq_id = next_seq_id_;
-    next_seq_id_ = (next_seq_id_ + 1) & kMaxInt32SeqId;
+    if (next_seq_id_ == kMaxInt32SeqId) {
+      next_seq_id_ = 0;
+    } else {
+      ++next_seq_id_;
+    }
 
     auto seq_it = seq_to_req_id_.find(seq_id);
     if (seq_it == seq_to_req_id_.end()) {

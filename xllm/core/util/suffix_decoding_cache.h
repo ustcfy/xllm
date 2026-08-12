@@ -84,6 +84,8 @@ class SuffixDecodingCache {
       bool use_tree_spec = false);
 
  private:
+  friend class SuffixDecodingCacheTestPeer;
+
   int32_t generate_seq_id(const std::string& req_id);
 
   void maybe_evict_requests(int32_t new_seq_id);

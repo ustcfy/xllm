@@ -18,9 +18,37 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 #include <vector>
 
 namespace xllm {
+
+class SuffixDecodingCacheTestPeer final {
+ public:
+  static void set_next_seq_id(SuffixDecodingCache& cache, int32_t next_seq_id) {
+    cache.next_seq_id_ = next_seq_id;
+  }
+
+  static int32_t next_seq_id(const SuffixDecodingCache& cache) {
+    return cache.next_seq_id_;
+  }
+};
+
+TEST(SuffixDecodingCacheTest, SequenceIdWrapsWithoutSignedOverflow) {
+  SuffixDecodingCache cache(/*max_tree_depth=*/16,
+                            /*max_cached_requests=*/-1);
+  SuffixDecodingCacheTestPeer::set_next_seq_id(
+      cache, std::numeric_limits<int32_t>::max());
+
+  const std::vector<int32_t> prompt = {1, 2, 3};
+  cache.start_request("req_a", std::span<const int32_t>(prompt));
+  EXPECT_EQ(SuffixDecodingCacheTestPeer::next_seq_id(cache), 0);
+
+  cache.start_request("req_b", std::span<const int32_t>(prompt));
+  EXPECT_EQ(SuffixDecodingCacheTestPeer::next_seq_id(cache), 1);
+  EXPECT_TRUE(cache.has_cached_request("req_a"));
+  EXPECT_TRUE(cache.has_cached_request("req_b"));
+}
 
 TEST(SuffixDecodingCacheTest, StartStopAndActiveSet) {
   SuffixDecodingCache cache(/*max_tree_depth=*/16, /*max_cached_requests=*/4);
