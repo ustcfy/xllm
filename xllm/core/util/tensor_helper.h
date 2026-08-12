@@ -183,12 +183,12 @@ inline bool safe_concat(const std::vector<torch::Tensor>& vec,
       return false;
     }
 
-    if (dim < 0) {
-      dim += ndim;
+    if (dim < -ndim || dim >= ndim) {
+      return false;
     }
 
-    if (dim >= ndim) {
-      return false;
+    if (dim < 0) {
+      dim += ndim;
     }
 
     for (size_t i = 1; i < vec.size(); ++i) {

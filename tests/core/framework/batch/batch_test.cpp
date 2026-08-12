@@ -247,6 +247,21 @@ class ScopedPrefillChunkStride final {
 
 }  // namespace
 
+TEST(TensorHelperTest, SafeConcatRejectsOutOfRangeDimension) {
+  const std::vector<torch::Tensor> tensors = {
+      torch::ones({2, 3}),
+      torch::ones({2, 3}),
+  };
+  torch::Tensor output;
+
+  EXPECT_FALSE(safe_concat(tensors, output, /*dim=*/-3));
+  EXPECT_FALSE(output.defined());
+
+  ASSERT_TRUE(safe_concat(tensors, output, /*dim=*/-2));
+  EXPECT_EQ(output.size(0), 4);
+  EXPECT_EQ(output.size(1), 3);
+}
+
 TEST(BatchInputBuilderTest, FirstChunkUsesRemotePrefix) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
