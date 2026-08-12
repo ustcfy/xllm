@@ -41,6 +41,7 @@ cc_library(
     eagle3_worker_impl.h
     dflash_worker_impl.h
     dspark_worker_impl.h
+    spec_worker_util.h
     forward_shared_memory_manager.h
     worker_rendezvous.h
   SRCS
