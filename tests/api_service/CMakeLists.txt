@@ -40,6 +40,7 @@ cc_test(
     api_service_test
   SRCS
     chat_json_parser_test.cpp
+    rerank_service_impl_test.cpp
   DEPS
     api_service
     GTest::gtest_main

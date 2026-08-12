@@ -33,6 +33,11 @@ void Qwen3RerankServiceImpl::process_async_impl(
     call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
     return;
   }
+  if (!has_documents(rpc_request)) {
+    call->finish_with_error(StatusCode::INVALID_ARGUMENT,
+                            "At least one document is required for reranking.");
+    return;
+  }
 
   auto query = rpc_request.query();
   std::vector<std::string> documents;

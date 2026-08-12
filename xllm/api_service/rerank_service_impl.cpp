@@ -89,6 +89,11 @@ void RerankServiceImpl::process_async_impl(std::shared_ptr<RerankCall> call) {
     call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
     return;
   }
+  if (!has_documents(rpc_request)) {
+    call->finish_with_error(StatusCode::INVALID_ARGUMENT,
+                            "At least one document is required for reranking.");
+    return;
+  }
 
   std::vector<std::string> documents;
   if (rpc_request.documents_size() > 0) {

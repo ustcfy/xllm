@@ -93,6 +93,10 @@ class RerankServiceImpl : public APIServiceImpl<RerankCall> {
   virtual void process_async_impl(std::shared_ptr<RerankCall> call);
 
  protected:
+  static bool has_documents(const proto::RerankRequest& request) {
+    return request.documents_size() > 0;
+  }
+
   DISALLOW_COPY_AND_ASSIGN(RerankServiceImpl);
   LLMMaster* master_ = nullptr;
 };
