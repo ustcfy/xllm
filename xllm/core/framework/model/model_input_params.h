@@ -392,7 +392,7 @@ struct AttentionDeviceInput {
     AttentionDeviceInput out;
     out.q_seq_lens = safe_to(q_seq_lens, device, true);
     out.kv_seq_lens = safe_to(kv_seq_lens, device, true);
-#if !defined(USE_CUDA)
+#if !defined(USE_CUDA) && !defined(USE_MUSA)
     out.q_cu_seq_lens = safe_to(q_cu_seq_lens, device, true);
 #else
     out.q_cu_seq_lens = q_cu_seq_lens;
@@ -620,7 +620,7 @@ struct AttentionInput {
         continue;
       }
 #endif
-#if defined(USE_MLU)
+#if defined(USE_MLU) || defined(USE_MUSA)
       if (target_device.type() == torch::kPrivateUse1) {
         *entry.target = get_tensor_from_blob(
             entry.sizes, entry.dtype, ptr, attention_device_buffer);
@@ -876,7 +876,7 @@ struct ParallelInput {
 #endif
   uint32_t layers_per_bacth_copy = std::numeric_limits<uint32_t>::max();
   std::shared_ptr<LayerSynchronizer> layer_wise_load_synchronizer = nullptr;
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MUSA)
   std::vector<int64_t> query_start_loc;
 #endif
 
@@ -894,7 +894,7 @@ struct ParallelInput {
 #endif
     out.layers_per_bacth_copy = layers_per_bacth_copy;
     out.layer_wise_load_synchronizer = layer_wise_load_synchronizer;
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MUSA)
     out.query_start_loc = query_start_loc;
 #endif
     return out;
@@ -1021,6 +1021,9 @@ struct ModelInputParams {
     params.is_spec_verify = is_spec_verify;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
     params.num_accepted_tokens_host = num_accepted_tokens_host;
+#if defined(USE_MUSA)
+    params.attn_metadata = attn_metadata;
+#endif
     params.mtp_topk_state =
         mtp_topk_state == nullptr ? nullptr : mtp_topk_state->to(device);
     for (const auto& table : multi_block_tables) {

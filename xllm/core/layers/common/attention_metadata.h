@@ -77,6 +77,19 @@ struct XAttentionTwoStageDecodeCache {
 };
 #endif
 
+#if defined(USE_MUSA)
+// FA3 / FlashInfer extras used by MUSA attention and graph replay:
+// CPU host mirrors for plan updates (avoid D2H during capture) and optional
+// shared FA3 scheduler metadata across layers.
+struct Fa3AttentionMetadata {
+  torch::Tensor paged_kv_indptr_host;
+  torch::Tensor paged_kv_indices_host;
+  torch::Tensor paged_kv_last_page_len_host;
+  bool share_fa3_scheduler_metadata = false;
+  mutable torch::Tensor fa3_scheduler_metadata;
+};
+#endif
+
 // AttentionMetadata contains batch-level information shared across all
 // attention layers. It is built once at the beginning of model forward pass and
 // reused by all layers. This avoids redundant computation and memory allocation
@@ -112,6 +125,8 @@ struct AttentionMetadata {
   // Spec-verify ACL graph can run full attention as expanded decode while GDN
   // layers keep the original spec-verify metadata.
   ExpandedDecodeMetadata expanded_decode;
+  // Shared by NPU ACL graph and MUSA FlashInfer expanded-decode routing.
+  bool is_spec_verify = false;
 
   // for mrope
   torch::Tensor mrope_cos;
@@ -186,9 +201,12 @@ struct AttentionMetadata {
   // Built by DSAMetadataBuilder and shared across all layers.
   std::shared_ptr<DSAMetadata> dsa_metadata;
 
+#if defined(USE_MUSA)
+  Fa3AttentionMetadata fa3_metadata;
+#endif
+
 #if defined(USE_NPU)
   // for npu
-  bool is_spec_verify = false;
   torch::Tensor q_seq_lens_host;
   torch::Tensor kv_seq_lens_host;
   // For ACL graph execution - fixed-address device tiling data for

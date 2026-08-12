@@ -472,7 +472,7 @@ int run() {
   }
 
 // disable block copy kernel on unsupported backends
-#if !defined(USE_NPU) && !defined(USE_CUDA)
+#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
   beam_search_config.enable_block_copy_kernel(false);
 #endif
   std::string model_type = "";
