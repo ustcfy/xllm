@@ -57,6 +57,7 @@ struct ContentBlockInfo {
 std::vector<Message> build_messages(
     const proto::AnthropicMessagesRequest& request) {
   std::vector<Message> messages;
+  messages.reserve(static_cast<size_t>(request.messages_size()) + 1);
 
   // Add system message if provided
   if (request.has_system_string()) {
@@ -86,8 +87,12 @@ std::vector<Message> build_messages(
 
       case proto::AnthropicMessage::kContentBlocks: {
         // Handle complex content blocks
+        const size_t content_block_count =
+            static_cast<size_t>(msg.content_blocks().blocks_size());
         std::vector<MMContent> content_parts;
+        content_parts.reserve(content_block_count);
         Message::ToolCallVec tool_calls;
+        tool_calls.reserve(content_block_count);
 
         for (const auto& block : msg.content_blocks().blocks()) {
           if (block.type() == "text" && block.has_text()) {
