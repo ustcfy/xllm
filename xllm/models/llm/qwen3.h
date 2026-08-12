@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <torch/nn/functional/normalization.h>
 
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
 #include "core/util/rec_model_utils.h"
 #if defined(USE_NPU)
@@ -58,6 +60,11 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       auto layer = layer::Qwen3DecoderLayer(context, i);
       layers_.push_back(layer);
     }
+
+    aux_capture_.emplace(
+        model_args,
+        options,
+        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   std::pair<torch::Tensor, torch::Tensor> apply_mrope(
@@ -159,6 +166,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
         attn_metadata.unshared_plan_info->layer_id = i;
       }
 #endif
+      aux_capture_->capture_layer(static_cast<int64_t>(i), h, residual);
       auto& layer = layers_[i];
       h = layer(h,
                 residual,
@@ -178,11 +186,15 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       }
     }
     auto [hidden_states, residual_out] = norm_(h, residual);
-    return ModelOutput(hidden_states, residual_out);
+    ModelOutput out = aux_capture_->finalize(hidden_states);
+    if (residual_out.has_value()) {
+      out.residual = residual_out.value();
+    }
+    return out;
   }
 
  protected:
-  layer::AttentionMetadata get_attention_metadata(
+  virtual layer::AttentionMetadata get_attention_metadata(
       const ModelInputParams& params,
       const torch::Tensor& h) {
 #if defined(USE_NPU)
@@ -232,6 +244,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
   layer::AttentionMask attn_mask_;
   layer::AttentionMask dense_attn_mask_;
 #endif
+  std::optional<AuxHiddenCapture> aux_capture_;
 };
 TORCH_MODULE(QWen3Model);
 
@@ -241,10 +254,10 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
       : LlmForCausalLMImplBase<QWen3Model>(context) {}
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
+                       const torch::Tensor& selected_idxes) {
     auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
+    if (selected_idxes.defined()) {
+      h = h.index_select(/*dim=*/0, selected_idxes);
     }
     namespace F = torch::nn::functional;
     return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
