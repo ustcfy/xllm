@@ -6,6 +6,7 @@ cc_library(
     runtime
   HDRS
     options.h
+    decode_graph_bucket.h
     forward_params.h
     dit_forward_params.h
     params_utils.h
@@ -46,6 +47,7 @@ cc_library(
     forward_shared_memory_manager.h
     worker_rendezvous.h
   SRCS
+    decode_graph_bucket.cpp
     executor.cpp
     executor_impl_factory.cpp
     base_executor_impl.cpp

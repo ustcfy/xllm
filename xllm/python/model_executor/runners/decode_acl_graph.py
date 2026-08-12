@@ -381,6 +381,16 @@ class DecodeAclGraphRunner(BaseRunner):
         if getattr(self.attention_backend, "is_mla", False):
             return
 
+        # TODO: Warmup capture with dummy data causes garbled
+        # output on the first real request for dense FIA models.  The root
+        # cause is likely related to 529d0b21's kv_cu_seq_lens cumulative
+        # format change interacting with the kv_seq_lens_delta tensor that is
+        # now aliased to static_metadata.kv_seq_lens during capture.  Disable
+        # warmup for now and let the first real decode lazily capture its
+        # graph bucket.  This trades slightly higher first-token latency for
+        # correctness.
+        return
+
         buckets = [size for size in (1, 2, 4, 8) if size <= self.max_batch]
         buckets.extend(range(16, self.max_batch + 1, 16))
         page_size = self.attention_backend.page_size
@@ -404,6 +414,13 @@ class DecodeAclGraphRunner(BaseRunner):
                     (batch_size,), 2, dtype=torch.int32, device="cpu"
                 ),
                 kv_seq_lens_host_values=[2] * batch_size,
+                # _decode_metadata (added by the expanded-decode path) reads the
+                # device kv_seq_lens directly; the warmup must provide one so the
+                # graph captures. The value is a dummy -- at replay the real
+                # metadata's kv_seq_lens is copied over the static buffer.
+                kv_seq_lens=torch.full(
+                    (batch_size,), 2, dtype=torch.int32, device=device
+                ),
                 kv_cu_seq_lens=torch.arange(
                     batch_size + 1, dtype=torch.int32, device=device
                 ).mul_(2),

@@ -432,6 +432,50 @@ TEST(DisaggPDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
   EXPECT_EQ(queued->num_prefix_cache_tokens(), 2u);
 }
 
+TEST(DisaggPDSchedulerTest, PromptAtDecodeBlockCapacityIsNotPermanent) {
+  EXPECT_FALSE(exceeds_decode_capacity(
+      /*num_prompt_tokens=*/6, /*block_size=*/2, /*num_blocks=*/4));
+}
+
+TEST(DisaggPDSchedulerTest, OnlyOversizedDecodeResponseIsTerminal) {
+  EXPECT_FALSE(is_permanent_rejection(/*status_code=*/404));
+  EXPECT_TRUE(is_permanent_rejection(kDecodeAddNewPromptTooLongStatusCode));
+  EXPECT_FALSE(is_permanent_rejection(/*status_code=*/500));
+}
+
+TEST(DisaggPDSchedulerTest, PromptBeyondDecodeBlockCapacityIsPermanent) {
+  EXPECT_TRUE(exceeds_decode_capacity(
+      /*num_prompt_tokens=*/7, /*block_size=*/2, /*num_blocks=*/4));
+}
+
+TEST(DisaggPDSchedulerTest, TemporaryDecodeBlockPressureIsNotPermanent) {
+  FakeEngine engine(/*num_blocks=*/4, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  std::shared_ptr<Request> holder = make_request({1, 2, 3, 4, 5, 6});
+  ASSERT_TRUE(block_manager->try_allocate(holder->sequences()[0].get()));
+  std::shared_ptr<Request> request = make_request({7, 8});
+  Sequence* sequence = request->sequences()[0].get();
+
+  EXPECT_FALSE(scheduler.try_allocate(sequence));
+  EXPECT_FALSE(scheduler.exceeds_decode_capacity(sequence));
+
+  block_manager->deallocate(holder.get());
+}
+
+TEST(DisaggPDSchedulerTest, OversizedDecodePromptIsPermanent) {
+  FakeEngine engine(/*num_blocks=*/4, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4, 5, 6, 7});
+  Sequence* sequence = request->sequences()[0].get();
+
+  EXPECT_FALSE(scheduler.try_allocate(sequence));
+  EXPECT_TRUE(scheduler.exceeds_decode_capacity(sequence));
+
+  block_manager->deallocate(request.get());
+}
+
 TEST(DisaggPDSchedulerTest, InvalidPrefillCachedTokensFallBackToZero) {
   for (int32_t num_cached_tokens : {-1, 5}) {
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);

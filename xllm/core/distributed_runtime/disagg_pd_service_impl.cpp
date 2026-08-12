@@ -160,8 +160,15 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
     Sequence* sequence = sequences[0].get();
 
     if (!scheduler_->try_allocate(sequence)) {
-      // FIXME: set status code
-      resp->set_status_code(404);
+      if (scheduler_->exceeds_decode_capacity(sequence)) {
+        LOG(ERROR) << "Decode cannot fit request prompt at any load, "
+                   << "request_id=" << req.req_id()
+                   << ", prompt_tokens=" << sequence->num_prompt_tokens();
+        resp->set_status_code(kDecodeAddNewPromptTooLongStatusCode);
+      } else {
+        // Current cache pressure can be relieved, so Prefill may retry.
+        resp->set_status_code(404);
+      }
     } else {
       // push the request to scheduler request buffer
       bool success =

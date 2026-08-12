@@ -50,6 +50,17 @@ namespace xllm {
 ProfileManager::ProfileManager(Engine* engine, const Options& options)
     : options_(options), engine_(engine) {
   CHECK(engine_ != nullptr);
+  int32_t max_decode_batch_size = options_.max_seqs_per_batch();
+  const int32_t max_concurrent_requests =
+      ::xllm::ServiceConfig::get_instance().max_concurrent_requests();
+  if (max_concurrent_requests > 0) {
+    max_decode_batch_size =
+        std::min(max_decode_batch_size, max_concurrent_requests);
+  }
+  decode_graph_warmup_plan_ =
+      build_decode_graph_warmup_plan(engine_->decode_graph_execution_shape(),
+                                     max_decode_batch_size,
+                                     options_.dp_size());
   block_manager_pool_ = engine_->block_manager_pool();
   CHECK(block_manager_pool_ != nullptr);
   prefill_time_predictor_ = std::make_unique<TimePredictor>(
@@ -852,11 +863,14 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
   RequestState req_state(prompt_token_ids);
   req_state.enable_schedule_overlap = options_.enable_schedule_overlap();
   const int32_t num_speculative_tokens =
-      ::xllm::SpeculativeConfig::get_instance().num_speculative_tokens();
+      decode_graph_warmup_plan_.execution_shape.num_speculative_tokens;
+  const int64_t num_decoding_tokens =
+      decode_graph_warmup_plan_.execution_shape.num_decoding_tokens;
+  CHECK_GT(num_decoding_tokens, 0);
   size_t seq_capacity = static_cast<size_t>(total_length) +
-                        static_cast<size_t>(num_speculative_tokens) + 1;
+                        static_cast<size_t>(num_decoding_tokens);
   if (options_.enable_schedule_overlap()) {
-    seq_capacity += static_cast<size_t>(num_speculative_tokens) + 1;
+    seq_capacity += static_cast<size_t>(num_decoding_tokens);
   }
   req_state.seq_capacity = seq_capacity;
   auto request = std::make_shared<Request>(
@@ -1161,17 +1175,10 @@ void ProfileManager::warmup_unified_for_graph() {
 void ProfileManager::warmup_decode_for_graph() {
   auto& model_args = engine_->model_args();
   int32_t max_context_len = model_args.max_position_embeddings();
-  int32_t max_decode_batch_size = options_.max_seqs_per_batch();
-  const int32_t max_concurrent_requests =
-      ::xllm::ServiceConfig::get_instance().max_concurrent_requests();
-  if (max_concurrent_requests > 0) {
-    max_decode_batch_size =
-        std::min(max_decode_batch_size, max_concurrent_requests);
-  }
   int32_t decode_seq_len = std::min(16, max_context_len);
 
-  std::vector<int32_t> decode_batch_sizes =
-      graph_decode_buckets(max_decode_batch_size, options_.dp_size());
+  const std::vector<int32_t>& decode_batch_sizes =
+      decode_graph_warmup_plan_.batch_sizes;
   const int32_t decode_bucket_count =
       static_cast<int32_t>(decode_batch_sizes.size());
 

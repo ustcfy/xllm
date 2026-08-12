@@ -27,6 +27,7 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "runtime/xservice_client.h"
+#include "scheduler/profile/decode_graph_warmup_plan.h"
 #include "time_predictor.h"
 
 namespace xllm {
@@ -193,6 +194,8 @@ class ProfileManager {
   const Options options_;
 
   Engine* engine_;
+
+  DecodeGraphWarmupPlan decode_graph_warmup_plan_;
 
   BlockManagerPool* block_manager_pool_;
 

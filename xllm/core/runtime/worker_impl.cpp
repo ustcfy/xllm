@@ -143,17 +143,13 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-// DFlash draft config lists target_layer_ids as the target-model layer indices
-// (0-based) whose output the draft consumes. xLLM's capture hook fires BEFORE
-// layer i runs, so capturing layer L's output means putting L+1 in the capture
-// set (matched against layer index i in the forward loop). Returns those L+1
-// ids.
-std::vector<int32_t> read_dflash_capture_layer_ids(
+// Hooks run before a layer, so output layer L is captured at L + 1.
+std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path) {
   JsonReader reader;
   const std::string config_path = model_weights_path + "/config.json";
   CHECK(reader.parse(config_path))
-      << "Failed to parse DFlash config: " << config_path;
+      << "Failed to parse block-diffusion draft config: " << config_path;
   std::vector<int32_t> capture_layer_ids;
   for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
            std::vector<std::string>{"target_layer_ids",
@@ -161,6 +157,10 @@ std::vector<int32_t> read_dflash_capture_layer_ids(
            std::vector<int32_t>{})) {
     capture_layer_ids.emplace_back(layer_id + 1);
   }
+  CHECK(!capture_layer_ids.empty())
+      << "Block-diffusion draft config requires target_layer_ids or "
+         "dflash_config.target_layer_ids: "
+      << config_path;
   return capture_layer_ids;
 }
 
@@ -758,7 +758,7 @@ const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
   cfg.enabled =
       parallel_args_.cp_size() > 1 && Platform::uses_model_cp_sharding() &&
       ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB" &&
-      owns_npu_cp_plan_build() && model_supports_model_cp();
+      owns_npu_parallel_input_prepare() && model_supports_model_cp();
   cfg.has_prefix_slots =
       KVCacheConfig::get_instance().enable_prefix_cache() ||
       SchedulerConfig::get_instance().enable_chunked_prefill();
@@ -791,6 +791,78 @@ const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
   npu_cp_runtime_config_ = std::move(cfg);
   npu_cp_runtime_config_computed_ = true;
   return npu_cp_runtime_config_;
+}
+#endif
+
+#if defined(USE_NPU)
+bool WorkerImpl::uses_npu_dp_ep_padding() const {
+  const ParallelArgs& parallel_args = context_.get_parallel_args();
+  return !parallel_args.mapping_data().empty() &&
+         parallel_args.cp_size() <= 1 &&
+         (parallel_args.dp_size() > 1 || parallel_args.ep_size() > 1);
+}
+
+void WorkerImpl::prepare_dp_ep_padding(ModelInputParams& input_params) {
+  if (!uses_npu_dp_ep_padding()) {
+    return;
+  }
+
+  const std::vector<int32_t>& token_sizes =
+      input_params.parallel.dp_global_token_nums;
+  const std::vector<int32_t>& raw_token_sizes =
+      input_params.parallel.raw_dp_global_token_nums;
+  const bool is_prefill = input_params.meta.batch_forward_type.no_decode();
+  const bool use_draft_decode_cache = options_.is_draft_engine() && !is_prefill;
+  if (use_draft_decode_cache) {
+    const DpEpPaddingData* cached =
+        draft_dp_ep_padding_cache_.find(token_sizes, raw_token_sizes);
+    if (cached != nullptr) {
+      input_params.parallel.dp_ep_padding_data = *cached;
+      return;
+    }
+  }
+
+  torch::Tensor token_size_per_dp_group =
+      torch::tensor(token_sizes,
+                    torch::TensorOptions()
+                        .device(torch::kCPU)
+                        .dtype(torch::kInt32)
+                        .pinned_memory(true));
+  torch::Tensor raw_token_size_per_dp_group =
+      raw_token_sizes.empty() ? torch::Tensor()
+                              : torch::tensor(raw_token_sizes,
+                                              torch::TensorOptions()
+                                                  .device(torch::kCPU)
+                                                  .dtype(torch::kInt32)
+                                                  .pinned_memory(true));
+  DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                            raw_token_size_per_dp_group,
+                            context_.get_model_args().num_experts_per_tok(),
+                            context_.get_parallel_args().mapping_data(),
+                            device_,
+                            dtype_,
+                            is_prefill);
+  DpEpPaddingData data = dp_ep_padding.build();
+  input_params.parallel.dp_ep_padding_data = data;
+  if (use_draft_decode_cache) {
+    draft_dp_ep_padding_cache_.insert(token_sizes, raw_token_sizes, data);
+  }
+}
+
+void WorkerImpl::prepare_dp_ep_padding_on_stream(ModelInputParams& input_params,
+                                                 Stream& prepare_stream) {
+  if (!uses_npu_dp_ep_padding()) {
+    return;
+  }
+  std::optional<std::unique_lock<std::mutex>> lock_guard;
+  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
+    auto& capture_lock =
+        ::xllm::npu::DeviceCaptureLock::get_instance().get_lock(
+            device_.index());
+    lock_guard.emplace(capture_lock);
+  }
+  c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
+  prepare_dp_ep_padding(input_params);
 }
 #endif
 
@@ -875,36 +947,10 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
       prepare_mla_prefixcache_inputs(input_params);
     }
 
-    if (!context_.get_parallel_args().mapping_data().empty() &&
-        !(context_.get_parallel_args().cp_size() > 1) &&
-        (context_.get_parallel_args().dp_size() > 1 ||
-         context_.get_parallel_args().ep_size() > 1)) {
-      torch::Tensor token_size_per_dp_group = torch::tensor(
-          processed_input.input_params.parallel.dp_global_token_nums,
-          torch::TensorOptions()
-              .device(torch::kCPU)
-              .dtype(torch::kInt32)
-              .pinned_memory(true));
-      const auto& raw_dp_token_nums =
-          processed_input.input_params.parallel.raw_dp_global_token_nums;
-      torch::Tensor raw_token_size_per_dp_group =
-          raw_dp_token_nums.empty() ? torch::Tensor()
-                                    : torch::tensor(raw_dp_token_nums,
-                                                    torch::TensorOptions()
-                                                        .device(torch::kCPU)
-                                                        .dtype(torch::kInt32)
-                                                        .pinned_memory(true));
-      const bool is_prefill =
-          processed_input.input_params.meta.batch_forward_type.no_decode();
-      DpEpPadding dp_ep_padding(token_size_per_dp_group,
-                                raw_token_size_per_dp_group,
-                                context_.get_model_args().num_experts_per_tok(),
-                                context_.get_parallel_args().mapping_data(),
-                                device_,
-                                dtype_,
-                                is_prefill);
-      processed_input.input_params.parallel.dp_ep_padding_data =
-          dp_ep_padding.build();
+    if (owns_npu_parallel_input_prepare()) {
+      prepare_dp_ep_padding(processed_input.input_params);
+    }
+    if (uses_npu_dp_ep_padding()) {
       if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
         processed_input.input_params.expert.expert_load_data =
             expert_load_data_;
@@ -1107,6 +1153,15 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 
       const auto output = this->step_for_schedule_overlap(input);
+#if defined(USE_NPU)
+      if (output.has_value() && !output->sample_output.next_tokens.defined() &&
+          output->ready_event != nullptr &&
+          (output->retained_input != nullptr ||
+           !output->retained_input_dependencies.empty())) {
+        CHECK(output->ready_event->synchronize())
+            << "failed to retire asynchronous output without tokens";
+      }
+#endif
       if (output.has_value()) {
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
@@ -1115,6 +1170,24 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
           is_recorded_ = true;
           cv_.notify_one();
         } else {
+#if defined(USE_NPU)
+          // Driver outputs are copied by GetLastStepResult, which waits for the
+          // ready event before the retained no-sync inputs can be released.
+          // Non-driver ranks are not queried by LLMEngine. In eager DP MTP,
+          // overwriting their previous output can therefore release temporary
+          // DP/EP padding tensors while ATB still holds their device addresses.
+          // Keep one-step scheduler overlap, but retire the previous eager
+          // output only after its compute event has completed.
+          const bool wait_for_eager_dp_spec_input_lifetime =
+              last_step_output_valid_ && options_.enable_speculative_decode() &&
+              parallel_args_.dp_size() > 1 &&
+              !::xllm::ExecutionConfig::get_instance().enable_graph() &&
+              last_step_output_.ready_event != nullptr;
+          if (wait_for_eager_dp_spec_input_lifetime) {
+            CHECK(last_step_output_.ready_event->synchronize())
+                << "failed to retire previous eager DP speculative input";
+          }
+#endif
           update_last_step_output(output);
         }
       } else {
@@ -1456,28 +1529,20 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
   if (options_.speculative_algorithm() == "DFlash" ||
       options_.speculative_algorithm() == "DSpark") {
-    // DSpark is a DFlash variant: same target-layer capture and draft-body
-    // swap, just a different draft model_type ("DSparkDraftModel") carrying the
-    // extra Markov head. Both engines capture the same target layers, whose ids
-    // live in the draft config: the draft engine reads its own weights path,
-    // the target engine reads --draft_model. The draft engine additionally
-    // swaps in the DFlash/DSpark draft body.
     const bool is_dspark = options_.speculative_algorithm() == "DSpark";
     const char* draft_model_type =
         is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
-    std::string draft_config_path;
     if (options_.is_draft_engine()) {
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type
                 << " for block-diffusion speculative decoding";
       args.model_type(draft_model_type);
-      draft_config_path = model_weights_path_;
     } else {
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
-      draft_config_path = options_.draft_model_path().value();
+      args.layers_to_capture(
+          read_capture_layer_ids(options_.draft_model_path().value()));
     }
-    args.layers_to_capture(read_dflash_capture_layer_ids(draft_config_path));
   } else if (options_.enable_speculative_decode() &&
              ::xllm::SpeculativeConfig::get_instance()
                  .enable_atb_spec_kernel()) {
@@ -1502,17 +1567,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       args.full_attention_interval(1);
     }
   }
-  // Eagle3/DFlash targets capture intermediate-layer aux hidden from the layers
-  // in layers_to_capture, the model's sole capture signal. Fill the default
-  // {2, n/2, n-3} for an Eagle3 target whose config omits the list; DFlash
-  // already filled it from the draft config. The DFlash/DSpark draft body
-  // (DFlashDraftModel/DSparkDraftModel) consumes context-KV rather than
-  // capturing, so exclude it.
-  if (options_.enable_speculative_decode() &&
-      SpeculativeConfig::requires_aux_hidden_capture(
-          options_.speculative_algorithm()) &&
-      args.model_type() != "DFlashDraftModel" &&
-      args.model_type() != "DSparkDraftModel" &&
+  if (options_.enable_speculative_decode() && !options_.is_draft_engine() &&
+      SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
       args.layers_to_capture().empty()) {
     const int32_t num_layers = static_cast<int32_t>(args.n_layers());
     args.layers_to_capture({2, num_layers / 2, num_layers - 3});

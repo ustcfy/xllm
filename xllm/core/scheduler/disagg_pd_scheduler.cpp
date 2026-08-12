@@ -34,6 +34,7 @@ limitations under the License.
 #include "disagg_pd_scheduler.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
+#include "framework/block/block_manager_pool.h"
 #include "framework/kv_cache_transfer/pd_topology_guard.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -46,6 +47,21 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+
+bool is_permanent_rejection(int32_t status_code) {
+  return status_code == kDecodeAddNewPromptTooLongStatusCode;
+}
+
+bool exceeds_decode_capacity(size_t num_prompt_tokens,
+                             size_t block_size,
+                             size_t num_blocks) {
+  if (block_size == 0) {
+    return true;
+  }
+  const size_t needed_blocks = util::ceil_div(num_prompt_tokens, block_size);
+  const size_t usable_blocks = num_blocks == 0 ? 0 : num_blocks - 1;
+  return needed_blocks > usable_blocks;
+}
 
 DisaggPDScheduler::DisaggPDScheduler(Engine* engine, const Options& options)
     : ContinuousScheduler(engine, options), server_name_("DisaggPDServer") {
@@ -528,6 +544,14 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     for (size_t i = 0; i < requests.size(); ++i) {
       if (resps.resps()[i].status_code() != 200) {
+        if (is_permanent_rejection(resps.resps()[i].status_code())) {
+          LOG(ERROR) << "Decode rejected an oversized prompt, request_id="
+                     << requests[i]->request_id() << ", prompt_tokens="
+                     << requests[i]->state().prompt_tokens.size()
+                     << ", selected_instance=" << selected_instance;
+          do_permanent_rejection(requests[i]);
+          continue;
+        }
         // push back to prefill_request_queue_
         if (requests[i]->offline()) {
           prefill_request_queue_offline_.enqueue(requests[i]);
@@ -1068,6 +1092,35 @@ bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
   } else {
     return false;
   }
+}
+
+bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
+  CHECK(sequence != nullptr);
+  const BlockManagerPool* block_manager = engine_->block_manager_pool();
+  CHECK(block_manager != nullptr);
+  const BlockManagerPool::Options& block_options = block_manager->options();
+  if (block_options.enable_xtensor() ||
+      !block_options.manager_types().empty() ||
+      (block_options.enable_host_offload() &&
+       options_.instance_role() != InstanceRole::DECODE)) {
+    return false;
+  }
+  return ::xllm::exceeds_decode_capacity(
+      sequence->num_prompt_tokens(),
+      static_cast<size_t>(block_manager->block_size()),
+      static_cast<size_t>(block_manager->num_blocks()));
+}
+
+void DisaggPDScheduler::do_permanent_rejection(
+    const std::shared_ptr<Request>& request) {
+  CHECK(request != nullptr);
+  response_processor_->process_failed_request(
+      request,
+      {StatusCode::RESOURCE_EXHAUSTED,
+       "Request prompt exceeds decode KV cache capacity"});
+  kv_cache_manager_->deallocate(request.get());
+  std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
+  req_to_channel_map_.erase(request->request_id());
 }
 
 void DisaggPDScheduler::update_token_latency_metrics(

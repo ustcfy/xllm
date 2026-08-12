@@ -23,6 +23,7 @@ limitations under the License.
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "common/macros.h"
@@ -56,6 +57,9 @@ class LLMEngine : public Engine {
   ForwardOutput step(std::vector<Batch>& batch) override;
 
   const runtime::Options& options() const { return options_; }
+
+  runtime::DecodeGraphExecutionShape decode_graph_execution_shape()
+      const override;
 
   bool init(MasterStatus master_status) override;
 
@@ -200,6 +204,9 @@ class LLMEngine : public Engine {
   // Effective TP width (MLU=dp_local; NPU=dp_local/cp).
   uint32_t dp_local_tp_size_;
   uint32_t dp_local_size_;
+  std::vector<std::vector<int32_t>> dp_batch_embedding_ids_;
+  std::vector<std::vector<std::string>> dp_batch_request_ids_;
+  std::vector<uint64_t> dp_batch_generations_;
 
   // For multi-node serving
   // engine brpc server, all workers connect to engine_server_,

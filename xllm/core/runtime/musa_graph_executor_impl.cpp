@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/layers/musa/flashinfer_planinfo.h"
 #include "core/platform/cuda/device_capture_lock.h"
 #include "core/platform/device.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/util/env_var.h"
 #include "core/util/rec_model_utils.h"
 #include "core/util/utils.h"
@@ -228,26 +229,6 @@ void restore_linear_attention_state(
   }
 }
 
-int64_t get_decode_graph_bucket_num_tokens(int64_t num_tokens) {
-  if (::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding()) {
-    return num_tokens;
-  }
-  if (num_tokens <= 1) {
-    return 1;
-  }
-  if (num_tokens <= 2) {
-    return 2;
-  }
-  if (num_tokens <= 4) {
-    return 4;
-  }
-  if (num_tokens <= 8) {
-    return 8;
-  }
-  return ((num_tokens + 15) / 16) * 16;
-}
-
 }  // namespace
 
 // MusaGraphPersistentParam implementation
@@ -270,7 +251,8 @@ MusaGraphPersistentParam::MusaGraphPersistentParam(
   } else {
     max_seqs_per_batch = options.max_seqs_per_batch();
   }
-  max_seqs_per_batch = get_decode_graph_bucket_num_tokens(max_seqs_per_batch);
+  max_seqs_per_batch = ::xllm::runtime::get_decode_graph_token_bucket(
+      max_seqs_per_batch, options.enable_graph_mode_decode_no_padding());
   auto tensor_options = torch::TensorOptions().device(device);
 
   const int64_t max_seq_len = args_.max_position_embeddings();
@@ -1904,7 +1886,8 @@ ModelOutput MusaGraphExecutorImpl::run(const torch::Tensor& tokens,
 
 uint32_t MusaGraphExecutorImpl::get_bucket_num_tokens(
     uint32_t num_tokens) const {
-  return static_cast<uint32_t>(get_decode_graph_bucket_num_tokens(num_tokens));
+  return static_cast<uint32_t>(::xllm::runtime::get_decode_graph_token_bucket(
+      num_tokens, options_.enable_graph_mode_decode_no_padding()));
 }
 
 // NOTE: REGISTER_EXECUTOR for MusaGraphExecutorImpl lives in

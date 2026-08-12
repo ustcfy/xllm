@@ -73,6 +73,11 @@ SuffixSpeculativeEngine::SuffixSpeculativeEngine(
     const runtime::Options& options)
     : SpeculativeEngine(options, /*use_draft_engine=*/false) {}
 
+runtime::DecodeGraphExecutionShape
+SpeculativeEngine::decode_graph_execution_shape() const {
+  return engine_->decode_graph_execution_shape();
+}
+
 bool SpeculativeEngine::init(MasterStatus master_status) {
   if (!init_model()) {
     return false;
