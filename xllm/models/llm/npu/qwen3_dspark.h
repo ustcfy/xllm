@@ -214,10 +214,10 @@ class DSparkQwen3ForCausalLMImpl final
 };
 TORCH_MODULE(DSparkQwen3ForCausalLM);
 
-// Draft config carries model_type="qwen3"; worker_impl overwrites
-// args.model_type to "DSparkDraftModel" so this factory builds the draft body.
+// Config model_type="qwen3" drives the args loader; architectures selects this
+// factory via model_arch (identity: registry key == architecture).
 REGISTER_CAUSAL_MODEL_WITH_VARNAME(dspark_draft_model,
-                                   DSparkDraftModel,
+                                   Qwen3DSparkModel,
                                    DSparkQwen3ForCausalLM);
 
 }  // namespace xllm::npu::model

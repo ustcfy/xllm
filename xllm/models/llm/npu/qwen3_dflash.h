@@ -383,10 +383,8 @@ class DFlashQwen3ForCausalLMImpl final
 };
 TORCH_MODULE(DFlashQwen3ForCausalLM);
 
-// Draft config carries model_type="qwen3" and loads via the qwen3_atb args
-// loader; worker_impl then overwrites args.model_type to "DFlashDraftModel"
-// so this factory is picked to build the draft body. No dedicated DFlash args
-// loader is registered.
+// Config model_type="qwen3" drives the args loader; architectures selects this
+// factory via model_arch (identity: registry key == architecture).
 REGISTER_CAUSAL_MODEL_WITH_VARNAME(dflash_draft_model,
                                    DFlashDraftModel,
                                    DFlashQwen3ForCausalLM);

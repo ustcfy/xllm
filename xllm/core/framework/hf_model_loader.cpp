@@ -833,6 +833,15 @@ bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
       util::should_enable_mla(std::filesystem::path(model_weights_path),
                               ModelConfig::get_instance().backend()));
 
+  // A variant checkpoint (e.g. a DFlash/DSpark draft) keeps its base model_type
+  // for the args loader but declares its draft-body identity via architectures.
+  if (const auto architectures =
+          reader.value<std::vector<std::string>>("architectures");
+      architectures.has_value() && !architectures->empty() &&
+      is_draft_architecture(architectures->front())) {
+    args_.model_arch(architectures->front());
+  }
+
   return true;
 }
 

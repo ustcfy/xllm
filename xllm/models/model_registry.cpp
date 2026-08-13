@@ -179,6 +179,20 @@ bool resolve_model_registration_name(const std::string& model_type,
 #endif
 }
 
+bool is_draft_architecture(const std::string& architecture) {
+  // Self-describing draft checkpoints whose HF architecture name IS their
+  // factory registry key. Explicit allowlist keeps draft dispatch opt-in.
+  static const std::unordered_set<std::string> kDraftArchitectures = {
+      "DFlashDraftModel",
+      "Qwen3DSparkModel",
+  };
+  return kDraftArchitectures.contains(architecture);
+}
+
+const std::string& model_dispatch_key(const ModelArgs& args) {
+  return args.model_arch().empty() ? args.model_type() : args.model_arch();
+}
+
 bool is_npu_model_cp_capable(const std::string& resolved_name) {
   // Registers model-side CP capability for master-side validation. Note this
   // is not the same switch as the worker-side NpuCpPlan gate: deepseek_v4 and
@@ -494,9 +508,10 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
 
   std::string resolved_name;
   std::string error_message;
-  if (!resolve_model_registration_name(context.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
+  const std::string& dispatch_key =
+      model_dispatch_key(context.get_model_args());
+  if (!resolve_model_registration_name(
+          dispatch_key, &resolved_name, &error_message)) {
     LOG(ERROR) << error_message;
     return nullptr;
   }
@@ -506,8 +521,7 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
     return factory(context);
   }
 
-  LOG(ERROR) << "Unsupported model type: "
-             << context.get_model_args().model_type();
+  LOG(ERROR) << "Unsupported model type: " << dispatch_key;
 
   return nullptr;
 }
@@ -515,9 +529,10 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
 std::unique_ptr<CausalLM> create_rec_model(const ModelContext& context) {
   std::string resolved_name;
   std::string error_message;
-  if (!resolve_model_registration_name(context.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
+  const std::string& dispatch_key =
+      model_dispatch_key(context.get_model_args());
+  if (!resolve_model_registration_name(
+          dispatch_key, &resolved_name, &error_message)) {
     LOG(ERROR) << error_message;
     return nullptr;
   }
@@ -527,8 +542,7 @@ std::unique_ptr<CausalLM> create_rec_model(const ModelContext& context) {
     return factory(context);
   }
 
-  LOG(ERROR) << "Unsupported rec model type: "
-             << context.get_model_args().model_type();
+  LOG(ERROR) << "Unsupported rec model type: " << dispatch_key;
 
   return nullptr;
 }
@@ -546,9 +560,10 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
 
   std::string resolved_name;
   std::string error_message;
-  if (!resolve_model_registration_name(context.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
+  const std::string& dispatch_key =
+      model_dispatch_key(context.get_model_args());
+  if (!resolve_model_registration_name(
+          dispatch_key, &resolved_name, &error_message)) {
     LOG(ERROR) << error_message;
     return nullptr;
   }
@@ -558,8 +573,7 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
     return factory(context);
   }
 
-  LOG(ERROR) << "Unsupported model type: "
-             << context.get_model_args().model_type();
+  LOG(ERROR) << "Unsupported model type: " << dispatch_key;
 
   return nullptr;
 }

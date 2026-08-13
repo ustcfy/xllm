@@ -796,9 +796,10 @@ bool WorkerImpl::model_supports_model_cp() const {
   model_cp_capable_computed_ = true;
   std::string resolved_name;
   std::string error_message;
-  if (!resolve_model_registration_name(context_.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
+  const std::string& dispatch_key =
+      model_dispatch_key(context_.get_model_args());
+  if (!resolve_model_registration_name(
+          dispatch_key, &resolved_name, &error_message)) {
     model_cp_capable_ = false;
     return false;
   }
@@ -1609,19 +1610,17 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (is_block_diffusion) {
     if (options_.is_draft_engine()) {
       args.layers_to_capture({});
-      const bool is_dspark = speculative_algorithm == "DSpark";
+      // DeepSeek-V4 DSpark selects its draft class via an explicit model_type
+      // override plus arg configuration; other block-diffusion drafts resolve
+      // their class from the checkpoint architecture (model_arch).
       const bool is_deepseek_v4_dspark =
-          is_dspark && util::is_deepseek_v4_model_type(args.model_type());
-      std::string draft_model_type =
-          is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+          speculative_algorithm == "DSpark" &&
+          util::is_deepseek_v4_model_type(args.model_type());
       if (is_deepseek_v4_dspark) {
-        draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
-      }
-      LOG(INFO) << "Overriding draft model_type from " << args.model_type()
-                << " to " << draft_model_type
-                << " for block-diffusion speculative decoding";
-      args.model_type(draft_model_type);
-      if (is_deepseek_v4_dspark) {
+        LOG(INFO) << "Overriding draft model_type from " << args.model_type()
+                  << " to " << util::kDeepseekV4DSparkModelType
+                  << " for block-diffusion speculative decoding";
+        args.model_type(std::string(util::kDeepseekV4DSparkModelType));
         configure_deepseek_v4_dspark_args(args, options_);
       }
     } else {

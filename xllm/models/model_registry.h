@@ -153,6 +153,13 @@ bool resolve_model_registration_name(const std::string& model_type,
                                      std::string* resolved_name,
                                      std::string* error_message = nullptr);
 
+// True if HF architectures[0] is a self-describing draft body (its own factory
+// registry key); other architectures fall back to model_type dispatch.
+bool is_draft_architecture(const std::string& architecture);
+
+// Factory dispatch key: model_arch when set, else model_type.
+const std::string& model_dispatch_key(const ModelArgs& args);
+
 // Lazily register the NPU ATB model-side CP pipeline capability for the four
 // supported models (deepseek_v32, deepseek_v32_mtp, glm_moe_dsa,
 // glm_moe_dsa_mtp) and return whether `resolved_name` is CP-capable.

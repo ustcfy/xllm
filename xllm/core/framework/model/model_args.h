@@ -38,6 +38,11 @@ struct ModelArgs {
 
   PROPERTY(std::string, model_type);
 
+  // Factory dispatch key from HF architectures[0]; empty falls back to
+  // model_type. Set only when a checkpoint's architecture differs from its base
+  // model_type (e.g. a draft body sharing a base checkpoint's model_type).
+  PROPERTY(std::string, model_arch);
+
   PROPERTY(std::string, dtype);
 
   PROPERTY(int64_t, hidden_size) = 0;
