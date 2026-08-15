@@ -15,7 +15,7 @@ limitations under the License.
 
 // Infrastructure for the embedded Python model executor:
 // - Interpreter lifecycle (ensure_python_interpreter)
-// - Weight loading (PyStateDict + PYBIND11_EMBEDDED_MODULE)
+// - Weight loading (PyStateDict + xllm_weight_loader module registration)
 // - Config serialization (dtype_to_string, PyDictVisitor)
 
 #include "models/py_model_helper.h"
@@ -52,6 +52,24 @@ void prepend_sys_path(const std::string& dir) {
     }
   }
   path.attr("insert")(0, py::str(dir));
+}
+
+// Registered at runtime, not via PYBIND11_EMBEDDED_MODULE: the macro's static
+// init aborts when this library is imported into an already-running
+// interpreter.
+void ensure_xllm_weight_loader_module() {
+  py::dict modules = py::module_::import("sys").attr("modules");
+  if (modules.contains("xllm_weight_loader")) {
+    return;
+  }
+  static PyModuleDef module_def;
+  py::module_ m = py::module_::create_extension_module(
+      "xllm_weight_loader", /*doc=*/nullptr, &module_def);
+  py::class_<PyStateDict>(m, "StateDict")
+      .def("get_tensor", &PyStateDict::get_tensor, py::arg("name"))
+      .def("has", &PyStateDict::has, py::arg("name"))
+      .def("keys", &PyStateDict::keys);
+  modules["xllm_weight_loader"] = m;
 }
 
 }  // namespace
@@ -94,6 +112,7 @@ void ensure_python_interpreter() {
 
     {
       py::gil_scoped_acquire gil;
+      ensure_xllm_weight_loader_module();
       std::string model_path = ModelConfig::get_instance().python_model_path();
       if (model_path.empty()) {
         const char* env = std::getenv("XLLM_PYTHON_MODEL_PATH");
@@ -145,13 +164,6 @@ py::list PyStateDict::keys() const {
     result.append(py::str(key));
   }
   return result;
-}
-
-PYBIND11_EMBEDDED_MODULE(xllm_weight_loader, m) {
-  py::class_<PyStateDict>(m, "StateDict")
-      .def("get_tensor", &PyStateDict::get_tensor, py::arg("name"))
-      .def("has", &PyStateDict::has, py::arg("name"))
-      .def("keys", &PyStateDict::keys);
 }
 
 }  // namespace xllm

@@ -57,9 +57,17 @@ void clear_python_object(py::object& object) {
   object = py::object();
 }
 
-}  // namespace
-
-PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
+// Registered at runtime, not via PYBIND11_EMBEDDED_MODULE: the macro's static
+// init aborts when this library is imported into an already-running
+// interpreter.
+void ensure_xllm_runtime_module() {
+  py::dict modules = py::module_::import("sys").attr("modules");
+  if (modules.contains("xllm_runtime")) {
+    return;
+  }
+  static PyModuleDef module_def;
+  py::module_ m = py::module_::create_extension_module(
+      "xllm_runtime", /*doc=*/nullptr, &module_def);
   register_attention_metadata_views(m);
 
 #if defined(USE_NPU)
@@ -72,7 +80,10 @@ PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
              return self.record_event(layer_id, device_id);
            });
 #endif
+  modules["xllm_runtime"] = m;
 }
+
+}  // namespace
 
 PyExecutorImpl::PyExecutorImpl(CausalLM* model,
                                const ModelArgs& args,
@@ -86,6 +97,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
 
   py::gil_scoped_acquire gil;
+  ensure_xllm_runtime_module();
   py::module_::import("xllm_runtime");
   py::module_ executor_module =
       py::module_::import("xllm.python.model_executor.executor");
