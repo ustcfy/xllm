@@ -78,6 +78,27 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
   bool share_weights_from(CausalLM& source) override;
 
+  // DSpark draft interface. The C++ DSparkWorkerImpl owns the sequential
+  // sampling loop and calls these on the Python draft model via pybind. The
+  // Markov bias and confidence head are delegated to the Python model; the
+  // sequential loop stays in C++ (it cannot fold into a captured graph).
+  torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) override;
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) override;
+  bool has_dspark_confidence_head() const override;
+
+  // Attention-free context-KV write for the Python DSpark draft. The Python
+  // executor binds the SAME kv_caches tensors this receives (see
+  // PyExecutorImpl::run bind_kv_caches), so the projected K/V scattered here
+  // land in exactly the storage the draft's attention reads.
+  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
+                               const torch::Tensor& positions,
+                               const torch::Tensor& device_cache_slots,
+                               std::vector<KVCache>& kv_caches,
+                               const ModelInputParams& input_params) override;
+
   pybind11::object& python_model() { return py_model_; }
   const pybind11::object& config_dict() const { return config_dict_; }
 
@@ -103,6 +124,18 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
   pybind11::object py_model_;
   pybind11::object config_dict_;
+  // Cached attribute handles for per-step hot-path methods (avoids a full
+  // Python attribute lookup on every DSpark speculative step). Bound in ctor;
+  // dspark_* remain unbound (falsy py::object) on non-DSpark targets.
+  pybind11::object dspark_markov_bias_;
+  pybind11::object dspark_confidence_probs_;
+  pybind11::object write_context_kv_;
+  // Cached once in ctor: py-side value is fixed post-init (confidence_proj is
+  // set in __init__ and never reassigned).
+  bool has_dspark_confidence_head_ = false;
+  // Built on first write_context_kv call and reused; the executor binds the
+  // draft's paged K/V tensors once, so the (k, v) tuples never rebind.
+  pybind11::object layer_caches_;
 };
 
 }  // namespace xllm

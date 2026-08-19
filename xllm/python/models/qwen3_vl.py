@@ -41,7 +41,7 @@ from xllm.python.layers import (
     RotaryEmbedding,
 )
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.qwen3 import Qwen3Config, Qwen3DecoderLayer
+from xllm.python.models.qwen3 import Qwen3Config, Qwen3DecoderLayer, load_qwen3_backbone_layer
 
 # ---------------------------------------------------------------------------
 # Vision config
@@ -999,9 +999,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
     def _load_llm_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         """Load LLM weights with TP sharding (same logic as qwen3.py)."""
         cfg = self.text_cfg
-        kv_replicas = tp_size // cfg.n_kv_heads if cfg.n_kv_heads < tp_size else 1
-        kv_rank = tp_rank // kv_replicas if kv_replicas > 1 else tp_rank
-        kv_world = tp_size // kv_replicas if kv_replicas > 1 else tp_size
+        kv_rank, kv_world = cfg.kv_shard(tp_rank, tp_size)
 
         def find(name: str):
             for pre in ("model.language_model.", "model."):
@@ -1024,52 +1022,19 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             r = kv_rank if kv else tp_rank
             return t.narrow(dim, r * chunk, chunk).contiguous()
 
-        def copy(param_name: str, ckpt_name: str | None = None) -> None:
-            self._copy("model." + param_name, load(ckpt_name or param_name))
-
         # embed_tokens (sharded on hidden dim).
         self._copy("model.embed_tokens.weight", shard("embed_tokens.weight", dim=1))
 
-        norm_ts = (
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "self_attn.q_norm.weight",
-            "self_attn.k_norm.weight",
-        )
         for i in range(cfg.n_layers):
-            p = f"layers.{i}."
-            for t in norm_ts:
-                copy(p + t)
-            # qkv_proj = concat of the TP-sharded q / k / v projections.
-            self._copy(
-                "model." + p + "self_attn.qkv_proj.weight",
-                torch.cat(
-                    [
-                        shard(p + "self_attn.q_proj.weight", 0),
-                        shard(p + "self_attn.k_proj.weight", 0, kv=True),
-                        shard(p + "self_attn.v_proj.weight", 0, kv=True),
-                    ],
-                    dim=0,
-                ),
-            )
-            self._copy(
-                "model." + p + "self_attn.o_proj.weight",
-                shard(p + "self_attn.o_proj.weight", dim=1),
-            )
-            # gate_up_proj = concat of the TP-sharded gate / up projections.
-            self._copy(
-                "model." + p + "mlp.gate_up_proj.weight",
-                torch.cat(
-                    [shard(p + "mlp.gate_proj.weight", 0), shard(p + "mlp.up_proj.weight", 0)],
-                    dim=0,
-                ),
-            )
-            self._copy(
-                "model." + p + "mlp.down_proj.weight",
-                shard(p + "mlp.down_proj.weight", dim=1),
+            load_qwen3_backbone_layer(
+                i,
+                src_prefix="layers.",
+                load_tensor=load,
+                shard=shard,
+                copy_in=self._copy,
             )
 
-        copy("norm.weight")
+        self._copy("model.norm.weight", load("norm.weight"))
 
     def _load_lm_head(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         """Load lm_head weights (sharded on vocab dim); tied embed skips."""

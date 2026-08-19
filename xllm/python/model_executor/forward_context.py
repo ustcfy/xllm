@@ -30,6 +30,12 @@ if TYPE_CHECKING:
     )
 
 
+@dataclass(slots=True)
+class ModelForwardOutput:
+    hidden_states: torch.Tensor
+    aux_hidden_states: torch.Tensor | None = None
+
+
 class LayerSynchronizer(Protocol):
     """Records a per-layer completion event for the PD KV-cache transfer thread.
 
@@ -39,7 +45,7 @@ class LayerSynchronizer(Protocol):
     forward to finish.
     """
 
-    def record_event(self, layer_id: int) -> None: ...
+    def record_event(self, layer_id: int) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)

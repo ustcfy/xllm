@@ -126,13 +126,16 @@ class DecodeCudaGraphRunner(BaseRunner):
 
     def warmup(
         self,
-        device: torch.device,
-        _dtype: torch.dtype,
-        _input_embedding: torch.Tensor | None = None,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
     ) -> None:
+        del input_ids, positions, metadata, input_embedding  # bucket warmup is shape-agnostic
         if self._warmed_up:
             return
 
+        device = self.device
         if self._stream is None:
             self._stream = torch.cuda.Stream(device=device)
         self._stream.wait_stream(torch.cuda.current_stream())

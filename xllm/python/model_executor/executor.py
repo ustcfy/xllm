@@ -24,7 +24,7 @@ from xllm.python.attention.backend import (
     normalize_layer_caches,
 )
 from xllm.python.layers.attention import Attention
-from xllm.python.model_executor.forward_context import LayerSynchronizer
+from xllm.python.model_executor.forward_context import LayerSynchronizer, ModelForwardOutput
 from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.platform import current_platform
 
@@ -179,6 +179,8 @@ class ModelExecutor:
 
             self.inductor_runner = InductorRunner(execution_model, self.attention_backend, device, graph_backend)
 
+        self._non_graph_runner = self.inductor_runner or self.eager_runner
+
     @staticmethod
     def _attention_config(layer: Attention) -> tuple[int, int, int, float, int]:
         return (
@@ -212,31 +214,15 @@ class ModelExecutor:
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | ModelForwardOutput:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
 
         graph_runner = self.decode_graph_runner
         if graph_runner is not None and graph_runner.can_execute(input_ids, metadata, input_embedding):
-            graph_runner.warmup(
-                input_ids,
-                positions,
-                metadata,
-                input_embedding,
-            )
-            return graph_runner.execute(input_ids, positions, metadata, input_embedding)
-        if self.inductor_runner is not None:
-            return self.inductor_runner.execute(
-                input_ids,
-                positions,
-                metadata,
-                input_embedding,
-                layer_synchronizer,
-            )
-        return self.eager_runner.execute(
-            input_ids,
-            positions,
-            metadata,
-            input_embedding,
-            layer_synchronizer,
-        )
+            graph_runner.warmup(input_ids, positions, metadata, input_embedding)
+            output = graph_runner.execute(input_ids, positions, metadata, input_embedding)
+        else:
+            output = self._non_graph_runner.execute(input_ids, positions, metadata, input_embedding, layer_synchronizer)
+
+        return output

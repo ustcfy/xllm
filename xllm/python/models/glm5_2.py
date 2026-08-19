@@ -32,7 +32,7 @@ GLM-5.2 structural deltas live here:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -46,7 +46,7 @@ from xllm.python.layers import (
     HiddenParallelEmbedding,
     RMSNorm,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import ModelForwardOutput, get_forward_context
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3MLP as Glm52MLP,
@@ -128,6 +128,11 @@ class Glm52Config:
     indexer_rope_interleave: bool = True
     num_nextn_predict_layers: int = 0
     index_share_for_mtp_iteration: bool = False
+    # DSpark/DFlash aux-hidden capture: 0-based post-layer output indices whose
+    # residual-stream output feeds the speculative draft. Empty = no capture
+    # (plain GLM-5.2 inference). Set from the C++ ModelArgs.layers_to_capture
+    # (pass-through of the draft's aux_hidden_state_layer_ids).
+    layers_to_capture: list[int] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> Glm52Config:
@@ -228,6 +233,7 @@ class Glm52Config:
             indexer_rope_interleave=bool(pick("indexer_rope_interleave", default=True)),
             num_nextn_predict_layers=int(pick("num_nextn_predict_layers", default=0)),
             index_share_for_mtp_iteration=bool(pick("index_share_for_mtp_iteration", default=False)),
+            layers_to_capture=list(pick("layers_to_capture", default=[]) or []),
         )
         cfg._resolve_indexer_types()
         cfg._resolve_mlp_layer_types()
@@ -544,6 +550,10 @@ class Glm52Model(nn.Module):
         )
         self.layers = nn.ModuleList([Glm52DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
+        # DSpark/DFlash aux-hidden capture: post-layer output indices whose
+        # (hidden + residual) feeds the draft. The draft's fc weight was trained
+        # against this exact column order.
+        self._layers_to_capture = frozenset(cfg.layers_to_capture)
         self.rotary = Glm52YarnRotaryEmbedding(
             cfg.qk_rope_head_dim,
             cfg.original_max_position_embeddings,
@@ -563,10 +573,16 @@ class Glm52Model(nn.Module):
         cos_sin_cache = self.rotary.cos_sin_cache
         residual: torch.Tensor | None = None
         prev_topk: torch.Tensor | None = None
-        for layer in self.layers:
+        captured: list[torch.Tensor] = []
+        layers_to_capture = self._layers_to_capture
+        for i, layer in enumerate(self.layers):
             hidden, residual, prev_topk = layer(hidden, residual, positions, cos_sin_cache, prev_topk)
-        hidden, last_hidden = self.norm(hidden, residual)
-        return hidden
+            if i in layers_to_capture:
+                captured.append(hidden + residual if residual is not None else hidden)
+        hidden, _ = self.norm(hidden, residual)
+        if not captured:
+            return hidden
+        return ModelForwardOutput(hidden, torch.cat(captured, dim=-1))
 
 
 class Glm52ForCausalLM(PyModelBase):
@@ -646,13 +662,15 @@ class Glm52ForCausalLM(PyModelBase):
                 self.model.layers[i].mlp.process_weights_after_loading()
             else:
                 se = p + "mlp.experts."
+                moe_layer = self.model.layers[i].mlp
+                moe_layer.allocate_experts_w13_for_loading()
+                moe_layer.allocate_experts_w2_for_loading()
                 w13_param = self.get_parameter(p + "mlp.experts_w13")
                 w2_param = self.get_parameter(p + "mlp.experts_w2")
                 w13_scale = self.get_buffer(p + "mlp.experts_w13_scale")
                 w13_offset = self.get_buffer(p + "mlp.experts_w13_offset")
                 w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
                 w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
-                moe_layer = self.model.layers[i].mlp
                 expert_start = moe_layer.local_expert_start
                 expert_end = moe_layer.local_expert_end
                 shard_world = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size

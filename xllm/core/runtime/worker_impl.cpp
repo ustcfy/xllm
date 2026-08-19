@@ -24,6 +24,7 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "absl/strings/str_join.h"
 #include "core/runtime/json_object_output_rows.h"
 #if defined(USE_NPU)
 #include "acl/acl.h"
@@ -35,19 +36,14 @@ limitations under the License.
 #endif
 
 #include <future>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "common/device_monitor.h"
-#include "common/global_flags.h"
-#include "common/metrics.h"
-#include "core/common/constants.h"
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
@@ -55,6 +51,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -74,7 +71,6 @@ limitations under the License.
 #if defined(USE_CUDA)
 #include "platform/cuda_profiler.h"
 #endif
-#include "core/distributed_runtime/master.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/eplb/eplb_utils.h"
 #include "framework/kv_cache/kv_cache.h"
@@ -84,18 +80,13 @@ limitations under the License.
 #include "framework/model_loader.h"
 #include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/sampling/sampler.h"
-#include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/global_xtensor.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #include "models/model_registry.h"
 #include "runtime/forward_params.h"
-#if defined(USE_NPU)
-#include "layers/npu/loader/rolling_weight_buffer.h"
-#endif
 #include "util/json_reader.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
-#include "util/timer.h"
 #include "util/utils.h"
 
 #define USE_ASYNC true
@@ -150,25 +141,18 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-// Hooks run before a layer, so output layer L is captured at L + 1.
 std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path) {
   JsonReader reader;
   const std::string config_path = model_weights_path + "/config.json";
   CHECK(reader.parse(config_path))
       << "Failed to parse block-diffusion draft config: " << config_path;
-  std::vector<int32_t> capture_layer_ids;
-  for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
-           std::vector<std::string>{"dspark_target_layer_ids",
-                                    "target_layer_ids",
-                                    "dflash_config.target_layer_ids"},
-           std::vector<int32_t>{})) {
-    capture_layer_ids.emplace_back(layer_id + 1);
-  }
+  auto capture_layer_ids = reader.value_or<std::vector<int32_t>>(
+      util::kSpeculatorsCaptureLayerIdKeys, std::vector<int32_t>{});
   CHECK(!capture_layer_ids.empty())
-      << "Block-diffusion draft config requires dspark_target_layer_ids, "
-         "target_layer_ids, or dflash_config.target_layer_ids: "
-      << config_path;
+      << "Block-diffusion draft config requires one of ["
+      << absl::StrJoin(util::kSpeculatorsCaptureLayerIdKeys, ", ")
+      << "]: " << config_path;
   return capture_layer_ids;
 }
 
@@ -1961,10 +1945,17 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       const bool is_dspark = speculative_algorithm == "DSpark";
       const bool is_deepseek_v4_dspark =
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
-      std::string draft_model_type =
-          is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+      // The speculators checkpoint describes the Qwen3 draft backbone, not
+      // the target architecture. Use the Python registry key explicitly.
+      const bool is_python_dspark =
+          is_dspark && ModelConfig::is_python_model_impl(
+                           ModelConfig::get_instance().model_impl());
+      std::string draft_model_type = is_dspark ? util::kDsparkDraftArchitecture
+                                               : util::kDflashDraftArchitecture;
       if (is_deepseek_v4_dspark) {
         draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
+      } else if (is_python_dspark) {
+        draft_model_type = util::kQwen3DsparkModelType;
       }
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type

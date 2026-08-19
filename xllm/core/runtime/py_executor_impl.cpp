@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/runtime/py_attention_metadata.h"
 #include "models/llm/py_causal_lm.h"
+#include "models/py_model_helper.h"
 
 #if defined(USE_NPU)
 #include <torch_npu/csrc/core/npu/NPUStream.h>
@@ -40,25 +41,6 @@ limitations under the License.
 namespace py = pybind11;
 
 namespace xllm {
-namespace {
-
-py::object optional_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() ? py::cast(tensor) : py::none();
-}
-
-void clear_python_object(py::object& object) {
-  if (!object) {
-    return;
-  }
-  if (!Py_IsInitialized()) {
-    (void)object.release();
-    return;
-  }
-  py::gil_scoped_acquire gil;
-  object = py::object();
-}
-
-}  // namespace
 
 PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
   register_attention_metadata_views(m);
@@ -96,9 +78,14 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       options_.max_seqs_per_batch(),
       options_.num_decoding_tokens(),
       ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
+  execute_method_ = py_executor_.attr("execute");
+  captures_aux_hidden_ = !args.layers_to_capture().empty();
 }
 
-PyExecutorImpl::~PyExecutorImpl() { clear_python_object(py_executor_); }
+PyExecutorImpl::~PyExecutorImpl() {
+  clear_python_object(execute_method_);
+  clear_python_object(py_executor_);
+}
 
 ForwardInput PyExecutorImpl::prepare_inputs(Batch& batch) {
   return batch.prepare_forward_input(
@@ -238,9 +225,24 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   // get_input_embeddings above), so the runner takes the 2-arg model() branch
   // and Qwen3VLModel.forward reads _inputs_embeds. positions_arg carries the
   // mRoPE [3,N]->1-D decode collapse.
-  py::object hidden_obj = py_executor_.attr("execute")(
+  py::object out = execute_method_(
       tokens, positions_arg, py_metadata, input_embedding, py_sync);
-  return ModelOutput(hidden_obj.cast<torch::Tensor>());
+  if (!captures_aux_hidden_) {
+    return ModelOutput(out.cast<torch::Tensor>());
+  }
+
+  // Aux-capturing targets return ModelForwardOutput so context-KV consumers
+  // can read both the target hidden states and the captured layer outputs.
+  // Function-local statics: constructed on first call (after Python init),
+  // amortized across every subsequent decode step.
+  static const py::str kHiddenStatesAttr("hidden_states");
+  static const py::str kAuxHiddenStatesAttr("aux_hidden_states");
+  ModelOutput output(out.attr(kHiddenStatesAttr).cast<torch::Tensor>());
+  py::object aux_hidden = out.attr(kAuxHiddenStatesAttr);
+  if (!aux_hidden.is_none()) {
+    output.aux_hidden_states = aux_hidden.cast<torch::Tensor>();
+  }
+  return output;
 }
 
 }  // namespace xllm

@@ -37,6 +37,12 @@ std::string get_model_type(const JsonReader& reader,
     model_type = reader.value<std::string>("model_name");
   }
   if (!model_type.has_value()) {
+    // Speculators-format draft configs keep model_type nested under
+    // transformer_layer_config; the worker later overrides to the draft
+    // factory.
+    model_type = reader.value<std::string>(kSpeculatorsBackboneModelTypeKey);
+  }
+  if (!model_type.has_value()) {
     LOG(FATAL) << "Please check config.json file in model path: " << model_path
                << ", it should contain model_type or model_name key.";
   }

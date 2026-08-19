@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <Python.h>
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
 
@@ -32,6 +33,25 @@ void ensure_python_interpreter();
 
 // Convert torch dtype to the string form used by Python model config.
 std::string dtype_to_string(const torch::TensorOptions& options);
+
+inline pybind11::object optional_tensor(const torch::Tensor& tensor) {
+  return tensor.defined() ? pybind11::cast(tensor) : pybind11::none();
+}
+
+// Release a py::object under a scoped GIL, but skip re-acquiring the GIL when
+// CPython has torn down: at that point decref is unsafe and the process is
+// exiting.
+inline void clear_python_object(pybind11::object& object) {
+  if (!object) {
+    return;
+  }
+  if (!Py_IsInitialized()) {
+    (void)object.release();
+    return;
+  }
+  pybind11::gil_scoped_acquire gil;
+  object = pybind11::object();
+}
 
 // PropertyVisitor that writes each field into a pybind11 dict.
 class __attribute__((visibility("hidden"))) PyDictVisitor final

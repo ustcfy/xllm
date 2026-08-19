@@ -19,12 +19,35 @@ limitations under the License.
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace xllm {
 
 class JsonReader;
 
 namespace util {
+
+// RedHat/vLLM "speculators"-format draft config vocabulary. Single source of
+// truth so the config loader, model-type resolver, and worker draft-config
+// readers never diverge on key spellings.
+inline constexpr const char* kSpeculatorsModelTypeKey =
+    "speculators_model_type";
+inline constexpr const char* kSpeculatorsTransformerConfigKey =
+    "transformer_layer_config";
+inline constexpr const char* kSpeculatorsBackboneModelTypeKey =
+    "transformer_layer_config.model_type";
+inline constexpr const char* kDsparkDraftArchitecture = "DSparkDraftModel";
+inline constexpr const char* kDflashDraftArchitecture = "DFlashDraftModel";
+inline constexpr const char* kQwen3DsparkModelType = "qwen3_dspark";
+
+// Draft config keys carrying the target layer ids to capture, by precedence.
+// (Hooks run before a layer, so the consumer offsets the id by +1.)
+inline const std::vector<std::string> kSpeculatorsCaptureLayerIdKeys = {
+    "dspark_target_layer_ids",
+    "target_layer_ids",
+    "dflash_config.target_layer_ids",
+    "aux_hidden_state_layer_ids",
+};
 
 std::string get_model_type(const JsonReader& reader,
                            const std::filesystem::path& model_path,

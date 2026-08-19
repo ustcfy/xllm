@@ -20,7 +20,6 @@ limitations under the License.
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
-#include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/layers/npu/npu_qwen3_moe_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -292,9 +291,6 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
         return ModelOutput();
       }
 
-      // Intralayer add-norm splits the stream, so pass residual for the add.
-      aux_capture_.capture_layer(static_cast<int32_t>(i), h, residual);
-
       auto& layer = layers_[i];
       const int32_t layer_index = i;
       rolling_guard.before_layer(layer_index);
@@ -312,6 +308,8 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       if (deep_stack_size && i < deep_stack_size) {
         h = h + deep_stacks[i];
       }
+      // Intralayer add-norm splits the stream, so pass residual for the add.
+      aux_capture_.capture_layer(layer_index, h, residual);
     }
 
     if (::xllm::KernelConfig::get_instance().enable_intralayer_addnorm())

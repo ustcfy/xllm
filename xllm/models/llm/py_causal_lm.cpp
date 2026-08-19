@@ -45,25 +45,6 @@ void share_python_model_weights(py::object& draft_model,
 
 }  // namespace detail
 
-namespace {
-
-void clear_python_object(py::object& object) {
-  if (!object) {
-    return;
-  }
-  if (!Py_IsInitialized()) {
-    // CPython has already torn down its GIL. Avoid decref during C++ static
-    // destruction; the process is exiting and the reference cannot be safely
-    // released anymore.
-    (void)object.release();
-    return;
-  }
-  py::gil_scoped_acquire gil;
-  object = py::object();
-}
-
-}  // namespace
-
 PyCausalLM::PyCausalLM(const ModelContext& context)
     : model_args_(context.get_model_args()),
       options_(context.get_tensor_options()),
@@ -179,9 +160,22 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   config_dict_ = build_config_dict(parallel_args);
   py_model_ = model_cls(config_dict_);
   py_model_.attr("eval")();
+  auto bind_optional = [&](const char* name) {
+    return py::hasattr(py_model_, name) ? py_model_.attr(name) : py::object();
+  };
+  if (auto h = bind_optional("has_dspark_confidence_head")) {
+    has_dspark_confidence_head_ = h().cast<bool>();
+  }
+  dspark_markov_bias_ = bind_optional("dspark_markov_bias");
+  dspark_confidence_probs_ = bind_optional("dspark_confidence_probs");
+  write_context_kv_ = bind_optional("write_context_kv");
 }
 
 PyCausalLM::~PyCausalLM() {
+  clear_python_object(dspark_markov_bias_);
+  clear_python_object(dspark_confidence_probs_);
+  clear_python_object(write_context_kv_);
+  clear_python_object(layer_caches_);
   clear_python_object(py_model_);
   clear_python_object(config_dict_);
 }
@@ -245,6 +239,58 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                             : py::object(py::none());
   py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
+}
+
+torch::Tensor PyCausalLM::dspark_markov_bias(
+    const torch::Tensor& previous_token_ids) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  return dspark_markov_bias_(previous_token_ids).cast<torch::Tensor>();
+}
+
+torch::Tensor PyCausalLM::dspark_confidence_probs(
+    const torch::Tensor& hidden_all,
+    const torch::Tensor& prev_matrix) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  return dspark_confidence_probs_(hidden_all, prev_matrix)
+      .cast<torch::Tensor>();
+}
+
+bool PyCausalLM::has_dspark_confidence_head() const {
+  return has_dspark_confidence_head_;
+}
+
+ModelOutput PyCausalLM::write_context_kv(
+    const torch::Tensor& target_hidden,
+    const torch::Tensor& positions,
+    const torch::Tensor& device_cache_slots,
+    std::vector<KVCache>& kv_caches,
+    const ModelInputParams& input_params) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  // The draft's paged K/V caches are the SAME tensors PyExecutorImpl bound,
+  // so scattering here lands in the storage the draft's attention reads.
+  // The tuple list is built once and reused across DSpark steps.
+  if (!layer_caches_) {
+    py::list caches;
+    for (auto& kv : kv_caches) {
+      caches.append(py::make_tuple(optional_tensor(kv.get_k_cache()),
+                                   optional_tensor(kv.get_v_cache())));
+    }
+    layer_caches_ = caches;
+  }
+  py::object py_sync = py::none();
+#if defined(USE_NPU)
+  if (input_params.parallel.layer_synchronizer != nullptr) {
+    py_sync = py::cast(input_params.parallel.layer_synchronizer);
+  }
+#endif
+  const bool recorded_all_events =
+      write_context_kv_(
+          target_hidden, positions, device_cache_slots, layer_caches_, py_sync)
+          .cast<bool>();
+  return recorded_all_events ? ModelOutput(target_hidden) : ModelOutput();
 }
 
 bool PyCausalLM::share_weights_from(CausalLM& source) {
