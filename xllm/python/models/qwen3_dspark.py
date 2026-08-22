@@ -162,9 +162,7 @@ class DSparkForCausalLM(PyModelBase):
         previous_token_ids: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self.confidence_head is not None
-        markov_embedding = None
-        if previous_token_ids is not None and self.markov_head is not None and self.confidence_head.with_markov:
-            markov_embedding = self.markov_head.embed(previous_token_ids)
+        markov_embedding = self.markov_head.embed(previous_token_ids) if self.confidence_head.with_markov else None
         return self.confidence_head(hidden_all, markov_embedding)
 
     # -- weight loading ---------------------------------------------------

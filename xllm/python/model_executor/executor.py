@@ -221,8 +221,5 @@ class ModelExecutor:
         graph_runner = self.decode_graph_runner
         if graph_runner is not None and graph_runner.can_execute(input_ids, metadata, input_embedding):
             graph_runner.warmup(input_ids, positions, metadata, input_embedding)
-            output = graph_runner.execute(input_ids, positions, metadata, input_embedding)
-        else:
-            output = self._non_graph_runner.execute(input_ids, positions, metadata, input_embedding, layer_synchronizer)
-
-        return output
+            return graph_runner.execute(input_ids, positions, metadata, input_embedding)
+        return self._non_graph_runner.execute(input_ids, positions, metadata, input_embedding, layer_synchronizer)

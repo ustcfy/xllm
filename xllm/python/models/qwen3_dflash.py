@@ -83,16 +83,16 @@ class DFlashModel(Qwen3Model):
         cos_sin_cache = self.rotary.cos_sin_cache
         # Reused [Q|K|V] scratch: Q stays zero, only K/V is rewritten per layer.
         # All layers share qkv shape by construction (built from the same cfg).
-        attn0 = self.layers[0].self_attn
-        num_heads = attn0.num_heads
-        num_kv_heads = attn0.num_kv_heads
-        head_dim = attn0.head_dim
-        eps = attn0.k_norm.eps
-        q_size = num_heads * head_dim
-        qkv = projected.new_empty(projected.shape[0], attn0.qkv_proj.weight.shape[0])
+        num_heads = self._num_heads
+        num_kv_heads = self._num_kv_heads
+        head_dim = self._head_dim
+        eps = self._k_norm_eps
+        q_size = self._q_size
+        qkv = projected.new_empty(projected.shape[0], self._qkv_dim)
         qkv[:, :q_size].zero_()
         kv_view = qkv[:, q_size:]
         record_event = None if layer_synchronizer is None else layer_synchronizer.record_event
+        kv_shape = (projected.shape[0], num_kv_heads, head_dim)
         for i in range(len(self.layers)):
             q_weight, k_weight = self._norm_weights[i]
             torch.matmul(projected, self._kv_weights_t[i], out=kv_view)
@@ -110,11 +110,8 @@ class DFlashModel(Qwen3Model):
                 cos=None,
                 sin=None,
             )
-            num_context = k.shape[0]
-            k_3d = k.view(num_context, num_kv_heads, head_dim)
-            v_3d = v.view(num_context, num_kv_heads, head_dim)
             k_cache, v_cache = layer_caches[i]
-            kernels.reshape_paged_cache(cache_slots, k_3d, v_3d, k_cache, v_cache)
+            kernels.reshape_paged_cache(cache_slots, k.view(kv_shape), v.view(kv_shape), k_cache, v_cache)
             if record_event is not None and not record_event(i):
                 return False
         return True
@@ -149,3 +146,12 @@ class DFlashModel(Qwen3Model):
             self.layers[i].mlp.down_proj.process_weights_after_loading()
             self._kv_weights_t.append(attn.qkv_proj.weight[attn.num_heads * attn.head_dim :].t())
             self._norm_weights.append((attn.q_norm.weight, attn.k_norm.weight))
+        # Per-layer [Q|K|V] shape and RMSNorm eps are shared across layers; cache
+        # scalars so write_context_kv skips per-step attribute walks.
+        attn0 = self.layers[0].self_attn
+        self._num_heads = attn0.num_heads
+        self._num_kv_heads = attn0.num_kv_heads
+        self._head_dim = attn0.head_dim
+        self._k_norm_eps = attn0.k_norm.eps
+        self._q_size = attn0.num_heads * attn0.head_dim
+        self._qkv_dim = attn0.qkv_proj.weight.shape[0]

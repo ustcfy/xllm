@@ -41,7 +41,6 @@ inline constexpr const char* kDflashDraftArchitecture = "DFlashDraftModel";
 inline constexpr const char* kQwen3DsparkModelType = "qwen3_dspark";
 
 // Draft config keys carrying the target layer ids to capture, by precedence.
-// (Hooks run before a layer, so the consumer offsets the id by +1.)
 inline const std::vector<std::string> kSpeculatorsCaptureLayerIdKeys = {
     "dspark_target_layer_ids",
     "target_layer_ids",

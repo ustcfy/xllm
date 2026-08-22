@@ -99,7 +99,7 @@ class Qwen3Config:
 
     def _num_kv_head_replicas(self, tp_size: int) -> int:
         """Number of TP ranks that share (replicate) each KV head."""
-        return tp_size // self.n_kv_heads if self.n_kv_heads < tp_size else 1
+        return max(1, tp_size // self.n_kv_heads)
 
     def head_split(self) -> tuple[int, int, int]:
         """Per-rank ``(num_heads, num_kv_heads, num_kv_head_replicas)``."""
