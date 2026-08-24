@@ -59,10 +59,39 @@ namespace xllm {
 
 namespace {
 
-JsonReader normalize_config_torch_dtype(const JsonReader& reader) {
+// In-memory config rewriter shared by all target/draft loaders: aliases
+// dtype → torch_dtype, and lifts a nested draft backbone (speculators format)
+// to the top level so downstream flat-config loaders see it uniformly.
+JsonReader normalize_config(const JsonReader& reader) {
   auto config = reader.data();
+
   if (!config.contains("torch_dtype") && config.contains("dtype")) {
     config["torch_dtype"] = config["dtype"];
+  }
+
+  if (config.contains(util::kSpeculatorsModelTypeKey) &&
+      config.contains(util::kSpeculatorsTransformerConfigKey)) {
+    const auto& tlc = config[util::kSpeculatorsTransformerConfigKey];
+    if (tlc.is_object()) {
+      for (const auto& [k, v] : tlc.items()) {
+        if (!v.is_null() && !config.contains(k)) {
+          config[k] = v;
+        }
+      }
+    }
+    // Speculators format nests rope_parameters under transformer_layer_config;
+    // after the tlc lift above, alias it to the top-level names downstream
+    // flat-config loaders read.
+    if (config.contains("rope_parameters") &&
+        config["rope_parameters"].is_object()) {
+      const auto& rope = config["rope_parameters"];
+      if (rope.contains("rope_theta") && !config.contains("rope_theta")) {
+        config["rope_theta"] = rope["rope_theta"];
+      }
+      if (rope.contains("factor") && !config.contains("rope_scaling")) {
+        config["rope_scaling"] = rope;
+      }
+    }
   }
 
   JsonReader normalized_reader;
@@ -827,7 +856,7 @@ bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
                << resolved_model_type;
     return false;
   }
-  const JsonReader config_reader = normalize_config_torch_dtype(reader);
+  const JsonReader config_reader = normalize_config(reader);
   model_args_loader(config_reader, &args_);
   args_.enable_mla(
       util::should_enable_mla(std::filesystem::path(model_weights_path),
@@ -844,7 +873,7 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
     return false;
   }
 
-  const JsonReader config_reader = normalize_config_torch_dtype(reader);
+  const JsonReader config_reader = normalize_config(reader);
 
   if (!load_quant_cfg(config_reader, quant_args_)) {
     return false;

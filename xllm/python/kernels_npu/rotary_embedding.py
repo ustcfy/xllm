@@ -76,6 +76,36 @@ def fused_qk_norm_rope(
     )
 
 
+def fused_k_norm_rope(
+    kv: torch.Tensor,
+    *,
+    num_heads_k: int,
+    head_dim: int,
+    eps: float,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused RMSNorm + RoPE variant for the attention-free DSpark/DFlash
+    context write. ``kv`` is a packed ``[K|V]`` projection (no Q lane, unlike
+    ``fused_qk_norm_rope``). Returns key and value tensors that are views into
+    one fused buffer, so callers must not write into them in place.
+    """
+    from .triton.split_qkv_rmsnorm_rope import (
+        split_kv_rmsnorm_rope,
+    )
+
+    return split_kv_rmsnorm_rope(
+        kv,
+        cos_sin_cache,
+        position_ids,
+        k_weight,
+        num_heads_k * head_dim,
+        head_dim,
+        eps,
+    )
+
+
 @torch.library.custom_op("xllm_python::interleaved_rotary_embedding", mutates_args=())
 def interleaved_rotary_embedding(
     value: torch.Tensor,
@@ -171,6 +201,7 @@ def vision_rotary_mul(
 
 __all__ = [
     "fused_qk_norm_rope",
+    "fused_k_norm_rope",
     "interleaved_rotary_embedding",
     "mrope",
     "vision_rotary_mul",

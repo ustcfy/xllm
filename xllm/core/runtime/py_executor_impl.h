@@ -58,6 +58,8 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   bool enable_mla_ = false;
 
   pybind11::object py_executor_;
+  pybind11::object execute_method_;
+  bool captures_aux_hidden_ = false;
   bool kv_bound_ = false;
   int64_t kv_layer_count_ = 0;
 };

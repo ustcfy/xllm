@@ -19,15 +19,12 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from xllm.python import distributed, kernels
-
-if TYPE_CHECKING:
-    from xllm_weight_loader import StateDict
 from xllm.python.attention.backend import (
     AttentionBackend,
     MlaIndexContext,
@@ -46,6 +43,7 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
 )
 from xllm.python.models.base import PyModelBase
+from xllm.python.models.weight_loader import WeightLoader
 
 _SHARED_EXPERT_STREAMS: dict[tuple[str, int | None], torch.npu.Stream] = {}
 
@@ -494,59 +492,14 @@ class W8A8DynamicLinear(nn.Module):
         )
 
 
-class W8A8WeightLoader:
-    """Shared W8A8 weight-loading helpers for a model's ``load_weights``.
+class W8A8WeightLoader(WeightLoader):
+    """W8A8 projection/MLP weight packing on top of the generic WeightLoader.
 
-    Owns the byte-identical checkpoint tensor lookup / TP sharding / W8A8
-    projection- and MLP-weight packing used by every W8A8 DSA model. The
+    The checkpoint lookup / TP sharding / param copy mechanics live in
+    ``WeightLoader``; only the W8A8-specific packing stays here. The
     model-specific per-layer loop (which projections/experts to load and in
-    what order) stays in each model; only the mechanics live here.
+    what order) stays in each model.
     """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        state_dicts: list[StateDict],
-        tp_size: int,
-        tp_rank: int,
-    ) -> None:
-        self._params_by_name = dict(model.named_parameters())
-        self._buffers_by_name = dict(model.named_buffers())
-        self._state_dicts = state_dicts
-        self.tp_size = tp_size
-        self.tp_rank = tp_rank
-
-    def find(self, name: str) -> Optional[StateDict]:
-        for sd in self._state_dicts:
-            if sd.has(name):
-                return sd
-        return None
-
-    def load_tensor(self, name: str) -> torch.Tensor:
-        sd = self.find(name)
-        assert sd is not None, f"checkpoint tensor not found: {name}"
-        return sd.get_tensor(name)
-
-    def shard(
-        self,
-        t: torch.Tensor,
-        dim: int,
-        world: Optional[int] = None,
-        rank: Optional[int] = None,
-    ) -> torch.Tensor:
-        world = self.tp_size if world is None else world
-        rank = self.tp_rank if rank is None else rank
-        if world <= 1:
-            return t
-        cs = t.size(dim) // world
-        return t.narrow(dim, rank * cs, cs).contiguous()
-
-    def copy_in(self, param_name: str, tensor: torch.Tensor) -> None:
-        p = self._params_by_name.get(param_name)
-        if p is None:
-            p = self._buffers_by_name.get(param_name)
-        assert p is not None, f"no parameter/buffer named {param_name}"
-        p.data.copy_(tensor.to(dtype=p.dtype, device=p.device))
 
     def load_w8a8_a(self, prefix: str, proj: str, shard_dims: Optional[dict] = None) -> None:
         for suffix in ("weight", "deq_scale", "quant_bias", "input_scale", "input_offset"):

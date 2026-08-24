@@ -24,7 +24,7 @@ from xllm.python.attention.backend import (
     AttentionMetadata,
     LayerCache,
 )
-from xllm.python.model_executor.forward_context import LayerSynchronizer
+from xllm.python.model_executor.forward_context import LayerSynchronizer, ModelForwardOutput
 
 
 class BaseRunner(ABC):
@@ -50,5 +50,5 @@ class BaseRunner(ABC):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | ModelForwardOutput:
         pass

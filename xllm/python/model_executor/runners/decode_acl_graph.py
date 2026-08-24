@@ -47,6 +47,7 @@ from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
     AclGraphTask,
     ForwardContext,
+    ModelForwardOutput,
     forward_context,
 )
 from xllm.python.model_executor.runners.base import BaseRunner
@@ -86,6 +87,7 @@ class _DecodeGraphEntry:
         "batch_size",
         "graph",
         "static_output",
+        "static_aux_hidden_states",
         "static_input_ids",
         "static_positions",
         "static_input_embedding",
@@ -482,7 +484,7 @@ class DecodeAclGraphRunner(BaseRunner):
         positions: torch.Tensor,
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | ModelForwardOutput:
         batch_size = input_ids.shape[0]
         entry = self._prepare_graph_entry(
             input_ids,
@@ -511,7 +513,11 @@ class DecodeAclGraphRunner(BaseRunner):
         self._replay_done_event.record(self._stream)
 
         torch.npu.current_stream().wait_stream(self._stream)
-        return output
+        if entry.static_aux_hidden_states is None:
+            return output
+        # DSpark/DFlash target also captures aux hidden states; return them as
+        # the same kind of persistent-buffer view.
+        return ModelForwardOutput(output, entry.static_aux_hidden_states[:batch_size])
 
     def _prepare_graph_entry(
         self,
@@ -638,6 +644,7 @@ class DecodeAclGraphRunner(BaseRunner):
         entry.batch_size = padded_batch_size
         entry.graph = None
         entry.static_output = None
+        entry.static_aux_hidden_states = None
         entry.graph_tasks = []
         entry.execution_state = AclGraphExecutionState({})
         entry.static_input_ids = torch.zeros(padded_batch_size, dtype=input_ids.dtype, device=device)
@@ -834,17 +841,27 @@ class DecodeAclGraphRunner(BaseRunner):
             execution_state=entry.execution_state,
         )
         with forward_context(context), torch.npu.graph(entry.graph, stream=self._stream):
-            entry.static_output = self._forward_static(entry)
+            self._forward_static(entry)
         entry.graph_tasks = capture_context.tasks
 
-    def _forward_static(self, entry: _DecodeGraphEntry) -> torch.Tensor:
+    def _forward_static(self, entry: _DecodeGraphEntry) -> None:
         if entry.static_input_embedding is None:
-            return self.model(entry.static_input_ids, entry.static_positions)
-        return self.model(
-            entry.static_input_ids,
-            entry.static_positions,
-            entry.static_input_embedding,
-        )
+            out = self.model(entry.static_input_ids, entry.static_positions)
+        else:
+            out = self.model(
+                entry.static_input_ids,
+                entry.static_positions,
+                entry.static_input_embedding,
+            )
+        # A DSpark/DFlash target returns a ModelForwardOutput carrying aux
+        # hidden states; a plain model returns a bare hidden-states tensor.
+        # Normalize so the captured graph owns a stable buffer for each.
+        if isinstance(out, ModelForwardOutput):
+            entry.static_output = out.hidden_states
+            entry.static_aux_hidden_states = out.aux_hidden_states
+        else:
+            entry.static_output = out
+            entry.static_aux_hidden_states = None
 
     @staticmethod
     def _update_graph_tasks(
@@ -853,6 +870,8 @@ class DecodeAclGraphRunner(BaseRunner):
     ) -> None:
         for task in graph_tasks:
             torch.npu.graph_task_update_begin(stream, task.handle)
-            task.update()
-            torch.npu.graph_task_update_end(stream)
+            try:
+                task.update()
+            finally:
+                torch.npu.graph_task_update_end(stream)
             task.event.record(stream)

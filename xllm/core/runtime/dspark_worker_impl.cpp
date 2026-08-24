@@ -22,19 +22,10 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
-#include "framework/parallel_state/process_group.h"
 #include "framework/sampling/sampler.h"
 #include "util/timer.h"
 
 namespace xllm {
-
-DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
-                                   const torch::Device& device,
-                                   const runtime::Options& options)
-    : DFlashWorkerImpl(parallel_args, device, options),
-      sampling_process_group_(parallel_args.tp_group_ != nullptr
-                                  ? parallel_args.tp_group_
-                                  : parallel_args.process_group_) {}
 
 DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
     const ForwardInput& input,
@@ -205,7 +196,13 @@ DSparkWorkerImpl::BlockSample DSparkWorkerImpl::sample_block(
     SampleOutput sample_output =
         sampler.forward(step_logits, step_sampling_params);
     torch::Tensor sampled_token_ids = sample_output.next_tokens;
-    synchronize_sampled_token_ids(sampled_token_ids, step_sampling_params);
+    // Sequential Markov steps feed previous_token_ids into the next step, so
+    // every rank must agree on each sampled token. Broadcast unconditionally
+    // (except greedy, where all ranks already match). Reuses the DFlash
+    // spec-token broadcast primitive.
+    if (!step_sampling_params.all_greedy_sample) {
+      broadcast_spec_tokens(sampled_token_ids, spec_broadcast_group());
+    }
 
     token_ids.index_put_({ISlice(), token_idx}, sampled_token_ids);
     if (need_draft_probs) {
@@ -238,17 +235,6 @@ DSparkWorkerImpl::BlockSample DSparkWorkerImpl::sample_block(
                                            torch::stack(probs_steps, /*dim=*/1))
                            : DraftProposal(std::move(token_ids)),
           std::move(confidence_probs)};
-}
-
-void DSparkWorkerImpl::synchronize_sampled_token_ids(
-    torch::Tensor& sampled_token_ids,
-    const SamplingParameters& sampling_params) const {
-  if (sampling_params.all_greedy_sample || sampling_process_group_ == nullptr ||
-      sampling_process_group_->world_size() <= 1) {
-    return;
-  }
-  sampled_token_ids = sampled_token_ids.contiguous();
-  sampling_process_group_->broadcast(sampled_token_ids, /*root_rank=*/0);
 }
 
 }  // namespace xllm

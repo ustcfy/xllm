@@ -74,6 +74,11 @@ def test_full_world_ep_partitions_glm_experts() -> None:
 
     assert moe.local_expert_start == 6
     assert moe.local_expert_end == 8
+
+    # Expert weights are allocated lazily at load time to cap loading peak
+    # memory; allocate here to verify the EP partition yields the right shapes.
+    moe.allocate_experts_w13_for_loading()
+    moe.allocate_experts_w2_for_loading()
     assert moe.experts_w13.shape == (2, 16, 16)
     assert moe.experts_w2.shape == (2, 16, 8)
 

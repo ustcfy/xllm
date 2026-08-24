@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NPU Triton implementation of split QKV, RMSNorm, and RoPE."""
+"""NPU Triton implementation of split QKV/KV, RMSNorm, and RoPE.
+
+One kernel serves both fused-attention (Q+K+V) and attention-free-context-write
+(K+V only) callers via a ``HAS_Q: tl.constexpr`` gate; the Q compute + Q store
+lane is dead-coded at Triton JIT time when the caller does not consume Q.
+"""
 
 from __future__ import annotations
 
@@ -53,10 +58,12 @@ def _split_qkv_rmsnorm_rope_kernel(
     v_batch_size_per_iter_per_vec: tl.constexpr,
     positions_gm_ptr,
     cos_sin_cache_gm_ptr,
+    HAS_Q: tl.constexpr,
 ):
     row_pid = tl.program_id(0)
 
-    q_weight_values = tl.load(q_weight_ptr + tl.arange(0, HEAD_DIM))
+    if HAS_Q:
+        q_weight_values = tl.load(q_weight_ptr + tl.arange(0, HEAD_DIM))
     k_weight_values = tl.load(k_weight_ptr + tl.arange(0, HEAD_DIM))
 
     batch_size_per_vec = tl.cdiv(batch_size, num_vectorcore)
@@ -70,8 +77,9 @@ def _split_qkv_rmsnorm_rope_kernel(
     input_batch_offset_end = min(input_batch_offset + batch_size_per_vec, batch_size)
 
     pos_indices = input_batch_offset + tl.arange(0, batch_size_per_iter_per_vec)
-    output_q_nblk_idx = tl.arange(0, q_hidden_size)
-    output_q_nmask = output_q_nblk_idx < q_hidden_size
+    if HAS_Q:
+        output_q_nblk_idx = tl.arange(0, q_hidden_size)
+        output_q_nmask = output_q_nblk_idx < q_hidden_size
     output_kv_nblk_idx = tl.arange(0, kv_hidden_size)
     output_kv_nmask = output_kv_nblk_idx < kv_hidden_size
     sin_cos_range = tl.arange(0, ROPE_DIM)
@@ -118,49 +126,50 @@ def _split_qkv_rmsnorm_rope_kernel(
         normalized_values = 1 / tl.sqrt(normalized_values + eps).reshape(qk_head_nums_per_iter_per_vec, 1)
         normalized_values = values_tmp1 * normalized_values
 
-        # Q: norm * weight + rope
-        normalized_values_tmp = extract_slice(
-            normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
-            offsets=(0, 0, 0),
-            sizes=(batch_size_per_iter_per_vec, q_head_num, HEAD_DIM),
-            strides=(1, 1, 1),
-        )
-        normalized_values_tmp = (normalized_values_tmp * q_weight_values).to(tl.bfloat16)
+        if HAS_Q:
+            # Q: norm * weight + rope
+            normalized_values_tmp = extract_slice(
+                normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
+                offsets=(0, 0, 0),
+                sizes=(batch_size_per_iter_per_vec, q_head_num, HEAD_DIM),
+                strides=(1, 1, 1),
+            )
+            normalized_values_tmp = (normalized_values_tmp * q_weight_values).to(tl.bfloat16)
 
-        values_tmp = tl.zeros((batch_size_per_iter_per_vec, q_head_num, ROPE_DIM), dtype=tl.bfloat16)
-        x1 = extract_slice(
-            normalized_values_tmp,
-            offsets=(0, 0, 0),
-            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
-            strides=(1, 1, 1),
-        )
-        x2 = extract_slice(
-            normalized_values_tmp,
-            offsets=(0, 0, HALF_ROPE_DIM),
-            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
-            strides=(1, 1, 1),
-        )
-        values_tmp = insert_slice(
-            values_tmp,
-            x1 * cos - x2 * sin,
-            offsets=(0, 0, 0),
-            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
-            strides=(1, 1, 1),
-        )
-        values_tmp = insert_slice(
-            values_tmp,
-            x2 * cos + x1 * sin,
-            offsets=(0, 0, HALF_ROPE_DIM),
-            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
-            strides=(1, 1, 1),
-        )
-        q_output_idx = output_q_nblk_idx[None, :] + (mblk_idx + pos_offset)[:, None] * q_hidden_size
-        q_mask = (mmask[:, None]) & (output_q_nmask[None, :])
-        tl.store(
-            q_gm_ptr + q_output_idx,
-            values_tmp.reshape(batch_size_per_iter_per_vec, q_hidden_size),
-            mask=q_mask,
-        )
+            values_tmp = tl.zeros((batch_size_per_iter_per_vec, q_head_num, ROPE_DIM), dtype=tl.bfloat16)
+            x1 = extract_slice(
+                normalized_values_tmp,
+                offsets=(0, 0, 0),
+                sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+                strides=(1, 1, 1),
+            )
+            x2 = extract_slice(
+                normalized_values_tmp,
+                offsets=(0, 0, HALF_ROPE_DIM),
+                sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+                strides=(1, 1, 1),
+            )
+            values_tmp = insert_slice(
+                values_tmp,
+                x1 * cos - x2 * sin,
+                offsets=(0, 0, 0),
+                sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+                strides=(1, 1, 1),
+            )
+            values_tmp = insert_slice(
+                values_tmp,
+                x2 * cos + x1 * sin,
+                offsets=(0, 0, HALF_ROPE_DIM),
+                sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+                strides=(1, 1, 1),
+            )
+            q_output_idx = output_q_nblk_idx[None, :] + (mblk_idx + pos_offset)[:, None] * q_hidden_size
+            q_mask = (mmask[:, None]) & (output_q_nmask[None, :])
+            tl.store(
+                q_gm_ptr + q_output_idx,
+                values_tmp.reshape(batch_size_per_iter_per_vec, q_hidden_size),
+                mask=q_mask,
+            )
 
         # K: norm * weight + rope
         normalized_values_tmp1 = extract_slice(
@@ -224,39 +233,44 @@ def _split_qkv_rmsnorm_rope_kernel(
         mblk_idx += v_batch_size_per_iter_per_vec
 
 
-def split_qkv_rmsnorm_rope(
-    qkv: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
+def _launch_split_norm_rope(
+    input_tensor: torch.Tensor,
+    q_output: torch.Tensor,
+    k_output: torch.Tensor,
+    v_output: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
     q_hidden_size: int,
     kv_hidden_size: int,
     head_dim: int,
     eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    has_q: bool,
+) -> None:
+    assert input_tensor.dtype == torch.bfloat16, (
+        f"split_norm_rope kernel scratch is hard-coded bf16; got dtype={input_tensor.dtype}"
+    )
     num_vectorcore = get_vectorcore_num()
     rope_dim = cos_sin_cache.shape[-1]
-    batch_size = qkv.shape[0]
+    batch_size = input_tensor.shape[0]
     total_hidden_size = q_hidden_size + kv_hidden_size * 2
-
-    q_output = torch.empty(batch_size, q_hidden_size, device=qkv.device, dtype=qkv.dtype)
-    k_output = torch.empty(batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype)
-    v_output = torch.empty(batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype)
 
     q_head_num = q_hidden_size // head_dim
     kv_head_num = kv_hidden_size // head_dim
 
     UB_SIZE = 87040
-    factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 2 + q_head_num * rope_dim // 2
-    batch_size_per_iter_per_vec = max(1, int(UB_SIZE / qkv.element_size()) // factor)
+    # RoPE scratch is sized to whichever lane (Q or K) is present.
+    rope_scratch_head_num = q_head_num if has_q else kv_head_num
+    factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 2 + rope_scratch_head_num * rope_dim // 2
+    batch_size_per_iter_per_vec = max(1, int(UB_SIZE / input_tensor.element_size()) // factor)
     qk_head_num_sum = q_head_num + kv_head_num
     qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
-    v_batch_size_per_iter_per_vec = int(UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1))
+    v_batch_size_per_iter_per_vec = int(UB_SIZE / input_tensor.element_size() // (kv_hidden_size + 1))
 
     grid = (num_vectorcore, 1, 1)
     _split_qkv_rmsnorm_rope_kernel[grid](
-        qkv,
+        input_tensor,
         q_output,
         k_output,
         v_output,
@@ -279,5 +293,72 @@ def split_qkv_rmsnorm_rope(
         v_batch_size_per_iter_per_vec,
         positions,
         cos_sin_cache,
+        has_q,
+    )
+
+
+def split_qkv_rmsnorm_rope(
+    qkv: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_hidden_size: int,
+    kv_hidden_size: int,
+    head_dim: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = qkv.shape[0]
+    q_output = torch.empty(batch_size, q_hidden_size, device=qkv.device, dtype=qkv.dtype)
+    k_output = torch.empty(batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype)
+    v_output = torch.empty(batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype)
+    _launch_split_norm_rope(
+        qkv,
+        q_output,
+        k_output,
+        v_output,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        has_q=True,
     )
     return q_output, k_output, v_output
+
+
+def split_kv_rmsnorm_rope(
+    kv: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    k_weight: torch.Tensor,
+    kv_hidden_size: int,
+    head_dim: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """K/V-only variant (packed ``[K|V]``, no Q lane); see ``fused_k_norm_rope``."""
+    batch_size = kv.shape[0]
+    k_output = torch.empty(batch_size, kv_hidden_size, device=kv.device, dtype=kv.dtype)
+    v_output = torch.empty(batch_size, kv_hidden_size, device=kv.device, dtype=kv.dtype)
+    # The kernel dead-codes the Q lane under HAS_Q=False, so q_gm_ptr/q_weight_ptr
+    # are never dereferenced. Alias K into those slots to keep the kernel ABI fixed
+    # without a throwaway Q allocation.
+    _launch_split_norm_rope(
+        kv,
+        k_output,
+        k_output,
+        v_output,
+        k_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        0,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        has_q=False,
+    )
+    return k_output, v_output

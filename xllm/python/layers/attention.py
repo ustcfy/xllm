@@ -45,6 +45,10 @@ class Attention(nn.Module):
         self.scale = scale
         self.sliding_window = sliding_window
         self.layer_id = layer_id
+        # Draft blocks (DSpark/DFlash) set causal=False post-construction: every
+        # draft position attends the whole context block; backend picks
+        # sparse_mode=NONE, atten_mask=None.
+        self.causal = True
 
     def forward(
         self,

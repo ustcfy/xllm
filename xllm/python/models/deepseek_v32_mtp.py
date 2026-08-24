@@ -34,6 +34,7 @@ from xllm.python.models.deepseek_v32 import (
     DeepseekV3ForCausalLM,
     DeepseekYarnRotaryEmbedding,
 )
+from xllm.python.models.weight_loader import WeightLoader
 
 
 class DeepseekV32MtpModel(nn.Module):
@@ -160,11 +161,8 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
             load_embedding=False,
         )
 
-        def find(name: str):
-            for state_dict in views:
-                if state_dict.has(name):
-                    return state_dict
-            return None
+        loader = WeightLoader(self, views, tp_size, tp_rank)
+        find = loader.find
 
         def copy_if_present(module_name: str, *aliases: str, required: bool = False) -> bool:
             state_dict = find(module_name + ".weight")

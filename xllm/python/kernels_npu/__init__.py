@@ -73,6 +73,7 @@ _EXPORTS = {
     "quantization": ("dynamic_quant", "quant_matmul", "quantize_per_tensor"),
     "rotary_embedding": (
         "fused_qk_norm_rope",
+        "fused_k_norm_rope",
         "interleaved_rotary_embedding",
         "mrope",
         "vision_rotary_mul",
@@ -101,6 +102,7 @@ __all__ = [
     "vision_fusion_attention",
     "batch_matmul_transpose",
     "fused_qk_norm_rope",
+    "fused_k_norm_rope",
     "interleaved_rotary_embedding",
     "mrope",
     "vision_rotary_mul",

@@ -24,6 +24,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/strings/str_join.h"
 #include "common/metrics.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -43,29 +44,11 @@ limitations under the License.
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "util/json_reader.h"
+#include "util/model_config_utils.h"
 #include "util/timer.h"
 
 namespace xllm {
 namespace {
-
-// Per-rank sampling RNG can diverge across the tensor-parallel group.
-// Broadcasting the sampled draft/accepted tokens to the group's rank 0 keeps
-// every rank's cached draft probs and accepted prefixes identical. No-op for a
-// single rank (world_size <= 1).
-ProcessGroup* spec_broadcast_group(const ParallelArgs& parallel_args) {
-  return parallel_args.tp_group_ != nullptr ? parallel_args.tp_group_
-                                            : parallel_args.process_group_;
-}
-
-void broadcast_spec_tokens(torch::Tensor& tokens,
-                           ProcessGroup* pg,
-                           int32_t root_rank = 0) {
-  if (pg == nullptr || pg->world_size() <= 1 || !tokens.defined()) {
-    return;
-  }
-  tokens = tokens.contiguous();
-  pg->broadcast(tokens, root_rank);
-}
 
 runtime::Options target_options(const runtime::Options& options) {
   runtime::Options opts = options;
@@ -440,8 +423,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     const int64_t num_target_layers =
         static_cast<int64_t>(target_args.layers_to_capture().size());
     CHECK_GT(num_target_layers, 0)
-        << "Block-diffusion draft config requires dspark_target_layer_ids, "
-           "target_layer_ids, or dflash_config.target_layer_ids.";
+        << "Block-diffusion draft config requires one of ["
+        << absl::StrJoin(util::kSpeculatorsCaptureLayerIdKeys, ", ") << "].";
     expected_context_hidden_size_ =
         static_cast<int64_t>(target_args.hidden_size()) * num_target_layers;
     draft_sas_mode_ = dflash_detail::classify_dspark_sas_mode(
@@ -1127,10 +1110,25 @@ void DFlashWorkerImpl::process_draft_sample_output(
   sample_output.probs = torch::Tensor();
 }
 
+ProcessGroup* DFlashWorkerImpl::spec_broadcast_group() const {
+  return parallel_args_.tp_group_ != nullptr ? parallel_args_.tp_group_
+                                             : parallel_args_.process_group_;
+}
+
+void DFlashWorkerImpl::broadcast_spec_tokens(torch::Tensor& tokens,
+                                             ProcessGroup* pg,
+                                             int32_t root_rank) {
+  if (pg == nullptr || pg->world_size() <= 1 || !tokens.defined()) {
+    return;
+  }
+  tokens = tokens.contiguous();
+  pg->broadcast(tokens, root_rank);
+}
+
 void DFlashWorkerImpl::maybe_broadcast_spec_tokens(torch::Tensor& tokens) {
   if (get_optimization_config().enable_spec_token_broadcast) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    broadcast_spec_tokens(tokens, spec_broadcast_group(parallel_args_));
+    broadcast_spec_tokens(tokens, spec_broadcast_group());
   }
 }
 

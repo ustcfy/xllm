@@ -113,5 +113,11 @@ def _register_builtin_models() -> None:
         "deepseek_v32_mtp",
     )
 
+    _register_model_path(
+        "xllm.python.models.qwen3_dspark",
+        "DSparkForCausalLM",
+        "qwen3_dspark",
+    )
+
 
 _register_builtin_models()

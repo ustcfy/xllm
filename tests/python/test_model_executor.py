@@ -701,6 +701,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
         entry = SimpleNamespace(
             graph=graph,
             static_output=static_output,
+            static_aux_hidden_states=None,
             static_metadata=SimpleNamespace(),
             graph_tasks=[],
             execution_state=SimpleNamespace(persistent_buffers={}),

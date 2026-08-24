@@ -33,6 +33,7 @@ from xllm.python.layers import (
 )
 from xllm.python.layers.gated_delta_net import Qwen3_5GatedDeltaNet
 from xllm.python.models.base import PyModelBase
+from xllm.python.models.weight_loader import WeightLoader
 
 
 @dataclass
@@ -449,12 +450,9 @@ class Qwen3_5ForCausalLM(PyModelBase):
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         cfg = self.cfg
-
-        def find(name: str):
-            for state_dict in state_dicts:
-                if state_dict.has(name):
-                    return state_dict
-            return None
+        loader = WeightLoader(self, state_dicts, tp_size, tp_rank)
+        find = loader.find
+        copy_in = loader.copy_in
 
         prefixes = ("model.language_model.", "model.", "")
         model_prefix = next(
@@ -472,15 +470,9 @@ class Qwen3_5ForCausalLM(PyModelBase):
 
         def shard_tensor(name: str, dim: int, rank: int = tp_rank, world: int = tp_size) -> torch.Tensor:
             value = tensor(name)
-            if world == 1:
-                return value
-            if value.size(dim) % world:
+            if world != 1 and value.size(dim) % world:
                 raise ValueError(f"cannot shard {name} across {world} ranks")
-            return value.chunk(world, dim=dim)[rank].contiguous()
-
-        def copy_in(name: str, value: torch.Tensor) -> None:
-            parameter = self.get_parameter(name)
-            parameter.data.copy_(value)
+            return loader.shard(value, dim, world=world, rank=rank)
 
         def shard_kv(name: str, dim: int = 0) -> torch.Tensor:
             if cfg.n_kv_heads >= tp_size:

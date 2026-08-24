@@ -31,6 +31,8 @@ limitations under the License.
 
 namespace xllm {
 
+class ProcessGroup;
+
 namespace dflash_detail {
 
 inline int32_t decode_draft_width(int32_t num_speculative_tokens,
@@ -217,6 +219,15 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                                      const SampleOutput& validate_output);
 
  protected:
+  // Sampling RNG can diverge across the tensor-parallel group; broadcasting the
+  // sampled tokens to rank 0 keeps every rank's cached draft probs and accepted
+  // prefixes identical. No-op for a single rank. Shared with the DSpark
+  // sequential sampler (DSparkWorkerImpl).
+  ProcessGroup* spec_broadcast_group() const;
+  static void broadcast_spec_tokens(torch::Tensor& tokens,
+                                    ProcessGroup* pg,
+                                    int32_t root_rank = 0);
+
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
   std::shared_ptr<EmbeddingCache> embedding_cache_;
 #if defined(USE_NPU) || defined(USE_MLU)

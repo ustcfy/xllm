@@ -19,8 +19,6 @@ limitations under the License.
 
 namespace xllm {
 
-class ProcessGroup;
-
 // DSpark = DFlash block-diffusion draft + a low-rank Markov head that adds a
 // prefix-dependent bias to each block position's draft logits. It reuses the
 // entire DFlash pipeline (prefill, context-K/V injection, validate, cache
@@ -32,9 +30,7 @@ class ProcessGroup;
 //      Markov sampling before returning proposals to the shared validator.
 class DSparkWorkerImpl final : public DFlashWorkerImpl {
  public:
-  DSparkWorkerImpl(const ParallelArgs& parallel_args,
-                   const torch::Device& device,
-                   const runtime::Options& options);
+  using DFlashWorkerImpl::DFlashWorkerImpl;
 
   ~DSparkWorkerImpl() override = default;
 
@@ -60,12 +56,6 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
                            const torch::Tensor& last_hidden,
                            const torch::Tensor& anchor_token_ids,
                            const SamplingParameters& sampling_params) const;
-
-  void synchronize_sampled_token_ids(
-      torch::Tensor& sampled_token_ids,
-      const SamplingParameters& sampling_params) const;
-
-  ProcessGroup* sampling_process_group_ = nullptr;
 };
 
 }  // namespace xllm
